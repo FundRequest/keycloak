@@ -22,6 +22,7 @@ import org.keycloak.common.enums.SslRequired;
 import org.keycloak.component.ComponentModel;
 import org.keycloak.models.*;
 import org.keycloak.models.cache.CachedRealmModel;
+import org.keycloak.models.cache.UserCache;
 import org.keycloak.models.cache.infinispan.entities.CachedRealm;
 import org.keycloak.storage.UserStorageProvider;
 import org.keycloak.storage.client.ClientStorageProvider;
@@ -199,6 +200,18 @@ public class RealmAdapter implements CachedRealmModel {
     public void setRememberMe(boolean rememberMe) {
         getDelegateForUpdate();
         updated.setRememberMe(rememberMe);
+    }
+
+    @Override
+    public String getDefaultSignatureAlgorithm() {
+        if(isUpdated()) return updated.getDefaultSignatureAlgorithm();
+        return cached.getDefaultSignatureAlgorithm();
+    }
+
+    @Override
+    public void setDefaultSignatureAlgorithm(String defaultSignatureAlgorithm) {
+        getDelegateForUpdate();
+        updated.setDefaultSignatureAlgorithm(defaultSignatureAlgorithm);
     }
 
     @Override
@@ -406,6 +419,30 @@ public class RealmAdapter implements CachedRealmModel {
     }
 
     @Override
+    public int getSsoSessionIdleTimeoutRememberMe() {
+        if (updated != null) return updated.getSsoSessionIdleTimeoutRememberMe();
+        return cached.getSsoSessionIdleTimeoutRememberMe();
+    }
+
+    @Override
+    public void setSsoSessionIdleTimeoutRememberMe(int seconds) {
+        getDelegateForUpdate();
+        updated.setSsoSessionIdleTimeoutRememberMe(seconds);
+    }
+
+    @Override
+    public int getSsoSessionMaxLifespanRememberMe() {
+        if (updated != null) return updated.getSsoSessionMaxLifespanRememberMe();
+        return cached.getSsoSessionMaxLifespanRememberMe();
+    }
+
+    @Override
+    public void setSsoSessionMaxLifespanRememberMe(int seconds) {
+        getDelegateForUpdate();
+        updated.setSsoSessionMaxLifespanRememberMe(seconds);
+    }
+
+    @Override
     public int getOfflineSessionIdleTimeout() {
         if (isUpdated()) return updated.getOfflineSessionIdleTimeout();
         return cached.getOfflineSessionIdleTimeout();
@@ -582,6 +619,18 @@ public class RealmAdapter implements CachedRealmModel {
         getDelegateForUpdate();
         updated.setOTPPolicy(policy);
 
+    }
+
+    @Override
+    public WebAuthnPolicy getWebAuthnPolicy() {
+        if (isUpdated()) return updated.getWebAuthnPolicy();
+        return cached.getWebAuthnPolicy();
+    }
+
+    @Override
+    public void setWebAuthnPolicy(WebAuthnPolicy policy) {
+        getDelegateForUpdate();
+        updated.setWebAuthnPolicy(policy);
     }
 
     @Override
@@ -1401,19 +1450,25 @@ public class RealmAdapter implements CachedRealmModel {
 
     public void executeEvictions(ComponentModel model) {
         if (model == null) return;
-        // If not realm component, check to see if it is a user storage provider child component (i.e. LDAP mapper)
-        if (model.getParentId() != null && !model.getParentId().equals(getId())) {
-            ComponentModel parent = getComponent(model.getParentId());
-            if (parent != null && UserStorageProvider.class.getName().equals(parent.getProviderType())) {
-                session.userCache().evict(this);
-            }
-            return;
+        
+        // if user cache is disabled this is null
+        UserCache userCache = session.userCache(); 
+        if (userCache != null) {        
+          // If not realm component, check to see if it is a user storage provider child component (i.e. LDAP mapper)
+          if (model.getParentId() != null && !model.getParentId().equals(getId())) {
+              ComponentModel parent = getComponent(model.getParentId());
+              if (parent != null && UserStorageProvider.class.getName().equals(parent.getProviderType())) {
+                userCache.evict(this);
+              }
+              return;
+          }
+  
+          // invalidate entire user cache if we're dealing with user storage SPI
+          if (UserStorageProvider.class.getName().equals(model.getProviderType())) {
+            userCache.evict(this);
+          }
         }
-
-        // invalidate entire user cache if we're dealing with user storage SPI
-        if (UserStorageProvider.class.getName().equals(model.getProviderType())) {
-            session.userCache().evict(this);
-        }
+        
         // invalidate entire realm if we're dealing with client storage SPI
         // entire realm because of client roles, client lists, and clients
         if (ClientStorageProvider.class.getName().equals(model.getProviderType())) {

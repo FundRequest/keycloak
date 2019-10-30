@@ -45,11 +45,9 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
-import javax.ws.rs.core.Context;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.Response.Status;
-import javax.ws.rs.core.UriInfo;
 
 import java.util.Arrays;
 import java.util.HashMap;
@@ -145,9 +143,7 @@ public class ScopeService {
 
         storeFactory.getScopeStore().delete(id);
 
-        if (authorization.getRealm().isAdminEventsEnabled()) {
-            audit(toRepresentation(scope), OperationType.DELETE);
-        }
+        audit(toRepresentation(scope), OperationType.DELETE);
 
         return Response.noContent().build();
     }
@@ -268,12 +264,10 @@ public class ScopeService {
     }
 
     private void audit(ScopeRepresentation resource, String id, OperationType operation) {
-        if (authorization.getRealm().isAdminEventsEnabled()) {
-            if (id != null) {
-                adminEvent.operation(operation).resourcePath(session.getContext().getUri(), id).representation(resource).success();
-            } else {
-                adminEvent.operation(operation).resourcePath(session.getContext().getUri()).representation(resource).success();
-            }
+        if (id != null) {
+            adminEvent.operation(operation).resourcePath(session.getContext().getUri(), id).representation(resource).success();
+        } else {
+            adminEvent.operation(operation).resourcePath(session.getContext().getUri()).representation(resource).success();
         }
     }
 }

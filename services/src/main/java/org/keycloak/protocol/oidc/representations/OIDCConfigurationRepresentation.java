@@ -40,6 +40,10 @@ public class OIDCConfigurationRepresentation {
     @JsonProperty("token_endpoint")
     private String tokenEndpoint;
 
+    /**
+     * The name 'token_introspection_endpoint' is deprecated and will be replaced by 'introspection_endpoint' as defined by RFC-8414.
+     * Until there, we just add {@code getIntrospectionEndpoint} claim to avoid breaking backward compatibility.
+     */
     @JsonProperty("token_introspection_endpoint")
     private String tokenIntrospectionEndpoint;
 
@@ -66,6 +70,12 @@ public class OIDCConfigurationRepresentation {
 
     @JsonProperty("id_token_signing_alg_values_supported")
     private List<String> idTokenSigningAlgValuesSupported;
+
+    @JsonProperty("id_token_encryption_alg_values_supported")
+    private List<String> idTokenEncryptionAlgValuesSupported;
+
+    @JsonProperty("id_token_encryption_enc_values_supported")
+    private List<String> idTokenEncryptionEncValuesSupported;
 
     @JsonProperty("userinfo_signing_alg_values_supported")
     private List<String> userInfoSigningAlgValuesSupported;
@@ -142,6 +152,16 @@ public class OIDCConfigurationRepresentation {
         return this.tokenIntrospectionEndpoint;
     }
 
+    /**
+     * See KEYCLOAK-8308. This method should be removed once the standard name is used to advertise the introspection endpoint.
+     * @return
+     */
+    @Deprecated
+    @JsonProperty("introspection_endpoint")
+    private String getIntrospectionEndpoint() {
+        return getTokenIntrospectionEndpoint();
+    }
+
     public void setTokenIntrospectionEndpoint(String tokenIntrospectionEndpoint) {
         this.tokenIntrospectionEndpoint = tokenIntrospectionEndpoint;
     }
@@ -208,6 +228,22 @@ public class OIDCConfigurationRepresentation {
 
     public void setIdTokenSigningAlgValuesSupported(List<String> idTokenSigningAlgValuesSupported) {
         this.idTokenSigningAlgValuesSupported = idTokenSigningAlgValuesSupported;
+    }
+
+    public List<String> getIdTokenEncryptionAlgValuesSupported() {
+        return idTokenEncryptionAlgValuesSupported;
+    }
+
+    public void setIdTokenEncryptionAlgValuesSupported(List<String> idTokenEncryptionAlgValuesSupported) {
+        this.idTokenEncryptionAlgValuesSupported = idTokenEncryptionAlgValuesSupported;
+    }
+
+    public List<String> getIdTokenEncryptionEncValuesSupported() {
+        return idTokenEncryptionEncValuesSupported;
+    }
+
+    public void setIdTokenEncryptionEncValuesSupported(List<String> idTokenEncryptionEncValuesSupported) {
+        this.idTokenEncryptionEncValuesSupported = idTokenEncryptionEncValuesSupported;
     }
 
     public List<String> getUserInfoSigningAlgValuesSupported() {

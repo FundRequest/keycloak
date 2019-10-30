@@ -35,38 +35,36 @@ import org.keycloak.testsuite.arquillian.annotation.AppServerContainers;
 public class AdapterTestExecutionDecider implements TestExecutionDecider {
 
     private final Logger log = Logger.getLogger(AdapterTestExecutionDecider.class);
-    private static final Map<Method, CachedRecord> cache = new HashMap<>();
 
     @Inject private Instance<TestContext> testContextInstance;
 
     @Override
     public ExecutionDecision decide(Method method) {
-        ExecutionDecision decision = getFromCache(method);
-        if (decision != null) {
-            return decision;
-        }
-
         TestContext testContext = testContextInstance.get();
         if (!testContext.isAdapterTest()) {
-            return execute(method, Boolean.TRUE, null);
+            return ExecutionDecision.execute();
         }
         if (testContext.isAdapterContainerEnabled() || testContext.isAdapterContainerEnabledCluster()) {
 
-            if (method.isAnnotationPresent(AppServerContainer.class)) { // taking method level annotation first as it has higher priority
-                if (getCorrespondingAnnotation(method).skip()) {
-                    return execute(method, Boolean.FALSE, "Skipped by @AppServerContainer method level annotation.");
+            // taking method level annotation first as it has higher priority
+            if (method.isAnnotationPresent(AppServerContainers.class) || method.isAnnotationPresent(AppServerContainer.class)) {
+                if (getCorrespondingAnnotation(method) == null) { //no corresponding annotation - taking class level annotation
+                    if (getCorrespondingAnnotation(testContext.getTestClass()).skip()) {
+                        return ExecutionDecision.dontExecute("Skipped by @AppServerContainer class level annotation.");
+                    }
+                } else if (getCorrespondingAnnotation(method).skip()) { //corresponding annotation
+                    return ExecutionDecision.dontExecute("Skipped by @AppServerContainer method level annotation.");
                 }
             } else { //taking class level annotation
-                if (getCorrespondingAnnotation(testContext.getTestClass()).skip()) {
-                    return execute(method, Boolean.FALSE, "Skipped by @AppServerContainer class level annotation.");
+                if (getCorrespondingAnnotation(testContext.getTestClass()) == null || 
+                        getCorrespondingAnnotation(testContext.getTestClass()).skip()) {
+                    return ExecutionDecision.dontExecute("Skipped by @AppServerContainer class level annotation.");
                 }
             }
             // execute otherwise
-            return execute(method, Boolean.TRUE, null);
-
-        } else {
-            return execute(method, Boolean.FALSE, "Not enabled by @AppServerContainer annotations.");
+            return ExecutionDecision.execute();
         }
+        return ExecutionDecision.dontExecute("Not enabled by @AppServerContainer annotations.");
     }
 
     @Override
@@ -75,7 +73,6 @@ public class AdapterTestExecutionDecider implements TestExecutionDecider {
     }
 
     private AppServerContainer getCorrespondingAnnotation(Method method) {
-        String appServerContainerName = testContextInstance.get().getAppServerInfo().getArquillianContainer().getName();
 
         AppServerContainers multipleAnnotations = method.getAnnotation(AppServerContainers.class);
 
@@ -87,13 +84,12 @@ public class AdapterTestExecutionDecider implements TestExecutionDecider {
         }
 
         return appServerContainers.stream()
-            .filter(annotation -> annotation.value().equals(appServerContainerName))
-            .findFirst()
-            .orElseThrow(() -> new IllegalStateException("Not found the @AppServerContainer annotation with current app server."));
+                .filter(annotation -> annotation.value().equals(testContextInstance.get().getAppServerContainerName()))
+                .findFirst()
+                .orElse(null);
     }
 
     private AppServerContainer getCorrespondingAnnotation(Class testClass) {
-        String appServerContainerName = testContextInstance.get().getAppServerInfo().getArquillianContainer().getName();
 
         Class<?> annotatedClass = AppServerTestEnricher.getNearestSuperclassWithAppServerAnnotation(testClass);
 
@@ -105,43 +101,10 @@ public class AdapterTestExecutionDecider implements TestExecutionDecider {
         } else {// single @AppServerContainer annotation
             appServerContainers = Arrays.asList(annotatedClass.getAnnotation(AppServerContainer.class));
         }
+
         return appServerContainers.stream()
-            .filter(annotation -> annotation.value().equals(appServerContainerName))
-            .findFirst()
-            .orElseThrow(() -> new IllegalStateException("Not found the @AppServerContainer annotation with current app server."));
-    }
-
-    private ExecutionDecision execute(Method method, Boolean execute, String message) {
-        if (execute) {
-            cache.put(method, new CachedRecord(Boolean.TRUE, ""));
-            return ExecutionDecision.execute();
-        } else {
-            cache.put(method, new CachedRecord(Boolean.FALSE, message));
-            log.debug(message);
-            return ExecutionDecision.dontExecute(message);
-        }
-    }
-
-    private ExecutionDecision getFromCache(Method method) {
-        if (cache.containsKey(method)) {
-            CachedRecord cachedRecord = cache.get(method);
-
-            if (cachedRecord.execute) {
-                return ExecutionDecision.execute(cachedRecord.message);
-            } else {
-                return ExecutionDecision.dontExecute(cachedRecord.message);
-            }
-        }
-        return null;
-    }
-
-    private class CachedRecord {
-        private final Boolean execute;
-        private final String message;
-
-        public CachedRecord(Boolean execute, String message) {
-            this.execute = execute;
-            this.message = message;
-        }
+                .filter(annotation -> annotation.value().equals(testContextInstance.get().getAppServerContainerName()))
+                .findFirst()
+                .orElse(null);
     }
 }

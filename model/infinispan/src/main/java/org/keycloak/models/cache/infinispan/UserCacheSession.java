@@ -194,6 +194,11 @@ public class UserCacheSession implements UserCache {
         }
 
         CachedUser cached = cache.get(id, CachedUser.class);
+
+        if (cached != null && !cached.getRealm().equals(realm.getId())) {
+            cached = null;
+        }
+        
         UserModel adapter = null;
         if (cached == null) {
             logger.trace("not cached");
@@ -718,7 +723,7 @@ public class UserCacheSession implements UserCache {
         consentModel.setLastUpdatedDate(cachedConsent.getLastUpdatedDate());
 
         for (String clientScopeId : cachedConsent.getClientScopeIds()) {
-            ClientScopeModel clientScope = KeycloakModelUtils.findClientScopeById(realm, clientScopeId);
+            ClientScopeModel clientScope = KeycloakModelUtils.findClientScopeById(realm, client, clientScopeId);
             if (clientScope != null) {
                 consentModel.addGrantedClientScope(clientScope);
             }

@@ -111,25 +111,22 @@ public class PasswordCredentialProvider implements CredentialProvider, Credentia
         CredentialModel oldPassword = getPassword(realm, user);
         if (oldPassword == null) return;
         int expiredPasswordsPolicyValue = policy.getExpiredPasswords();
+        List<CredentialModel> list = getCredentialStore().getStoredCredentialsByType(realm, user, CredentialModel.PASSWORD_HISTORY);
         if (expiredPasswordsPolicyValue > 1) {
-            List<CredentialModel> list = getCredentialStore().getStoredCredentialsByType(realm, user, CredentialModel.PASSWORD_HISTORY);
             // oldPassword will expire few lines below, and there is one active password,
             // hence (expiredPasswordsPolicyValue - 2) passwords should be left in history
             final int passwordsToLeave = expiredPasswordsPolicyValue - 2;
             if (list.size() > passwordsToLeave) {
                 list.stream()
-                  .sorted((o1, o2) -> { // sort by date descending
-                      Long o1Date = o1.getCreatedDate() == null ? Long.MIN_VALUE : o1.getCreatedDate();
-                      Long o2Date = o2.getCreatedDate() == null ? Long.MIN_VALUE : o2.getCreatedDate();
-                      return (- o1Date.compareTo(o2Date));
-                  })
+                  .sorted(CredentialModel.comparingByStartDateDesc())
                   .skip(passwordsToLeave)
                   .forEach(p -> getCredentialStore().removeStoredCredential(realm, user, p.getId()));
             }
             oldPassword.setType(CredentialModel.PASSWORD_HISTORY);
             getCredentialStore().updateCredential(realm, user, oldPassword);
         } else {
-            session.userCredentialManager().removeStoredCredential(realm, user, oldPassword.getId());
+            list.stream().forEach(p -> getCredentialStore().removeStoredCredential(realm, user, p.getId()));
+            getCredentialStore().removeStoredCredential(realm, user, oldPassword.getId());
         }
 
     }

@@ -25,6 +25,7 @@ import org.keycloak.authorization.model.Scope;
 import org.keycloak.authorization.permission.ResourcePermission;
 import org.keycloak.authorization.store.ResourceStore;
 import org.keycloak.representations.idm.authorization.AuthorizationRequest;
+import org.keycloak.representations.idm.authorization.DecisionStrategy;
 import org.keycloak.representations.idm.authorization.Permission;
 
 import java.util.ArrayList;
@@ -70,12 +71,19 @@ public class DecisionPermissionCollector extends AbstractDecisionCollector {
             for (Result.PolicyResult policyResult : result.getResults()) {
                 Policy policy = policyResult.getPolicy();
                 Set<Scope> policyScopes = policy.getScopes();
+                Set<Resource> policyResources = policy.getResources();
+                boolean containsResource = policyResources.contains(resource);
 
                 if (isGranted(policyResult)) {
                     if (isScopePermission(policy)) {
                         for (Scope scope : requestedScopes) {
                             if (policyScopes.contains(scope)) {
                                 grantedScopes.add(scope);
+                                // we need to grant any scope granted by a permission in case it is not explicitly
+                                // associated with the resource. For instance, resources inheriting scopes from parent resources.
+                                if (resource != null && !resource.getScopes().contains(scope)) {
+                                    deniedScopes.remove(scope);
+                                }
                             }
                         }
                     } else if (isResourcePermission(policy)) {
@@ -84,15 +92,21 @@ public class DecisionPermissionCollector extends AbstractDecisionCollector {
                         userManagedPermissions.add(policyResult);
                     }
                     if (!resourceGranted) {
-                        resourceGranted = policy.getResources().contains(resource);
+                        resourceGranted = containsResource;
                     }
                 } else {
                     if (isResourcePermission(policy)) {
-                        if (!resourceGranted) {
+                        // deny all requested scopes if the resource-based permission is associated with the resource or if the
+                        // resource was not granted by any other permission
+                        if (containsResource || !resourceGranted) {
                             deniedScopes.addAll(requestedScopes);
                         }
                     } else {
-                        deniedScopes.addAll(policyScopes);
+                        // deny all scopes associated with the scope-based permission if the permission is associated with the 
+                        // resource or if the permission applies to any resource associated with the scopes
+                        if (containsResource || policyResources.isEmpty()) {
+                            deniedScopes.addAll(policyScopes);
+                        }
                     }
                     if (!anyDeny) {
                         anyDeny = true;
@@ -100,7 +114,11 @@ public class DecisionPermissionCollector extends AbstractDecisionCollector {
                 }
             }
 
-            // remove any scope denied from the list of granted scopes
+            if (DecisionStrategy.AFFIRMATIVE.equals(resourceServer.getDecisionStrategy())) {
+                // remove any scope that was granted from the list of denied scopes if the decision strategy is affirmative
+                deniedScopes.removeAll(grantedScopes);
+            }
+
             grantedScopes.removeAll(deniedScopes);
 
             if (userManagedPermissions.isEmpty()) {
@@ -109,7 +127,13 @@ public class DecisionPermissionCollector extends AbstractDecisionCollector {
                 }
             } else {
                 for (Result.PolicyResult userManagedPermission : userManagedPermissions) {
-                    grantedScopes.addAll(userManagedPermission.getPolicy().getScopes());
+                    Set<Scope> scopes = new HashSet<>(userManagedPermission.getPolicy().getScopes());
+
+                    if (!requestedScopes.isEmpty()) {
+                        scopes.retainAll(requestedScopes);
+                    }
+
+                    grantedScopes.addAll(scopes);
                 }
 
                 if (grantedScopes.isEmpty() && !resource.getScopes().isEmpty()) {
@@ -160,12 +184,22 @@ public class DecisionPermissionCollector extends AbstractDecisionCollector {
             metadata = request.getMetadata();
         }
 
+        Permission permission;
+
         if (resource != null) {
             String resourceName = metadata == null || metadata.getIncludeResourceName() ? resource.getName() : null;
-            return new Permission(resource.getId(), resourceName, scopes, claims);
+            permission = new Permission(resource.getId(), resourceName, scopes, claims);
+        } else {
+            permission = new Permission(null, null, scopes, claims);
         }
 
-        return new Permission(null, null, scopes, claims);
+        onGrant(permission);
+
+        return permission;
+    }
+
+    protected void onGrant(Permission permission) {
+
     }
 
     private static boolean isResourcePermission(Policy policy) {

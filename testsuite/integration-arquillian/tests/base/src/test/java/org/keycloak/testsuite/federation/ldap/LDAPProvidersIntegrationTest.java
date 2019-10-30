@@ -985,6 +985,34 @@ public class LDAPProvidersIntegrationTest extends AbstractLDAPTest {
         });
     }
 
+
+    // KEYCLOAK-9002
+    @Test
+    public void testSearchWithPartiallyCachedUser() {
+        testingClient.server().run(session -> {
+            session.userCache().clear();
+        });
+
+
+        // This will load user from LDAP and partially cache him (including attributes)
+        testingClient.server().run(session -> {
+            LDAPTestContext ctx = LDAPTestContext.init(session);
+            RealmModel appRealm = ctx.getRealm();
+            UserModel user = session.users().getUserByUsername("johnkeycloak", appRealm);
+            Assert.assertNotNull(user);
+
+            user.getAttributes();
+        });
+
+
+        // Assert search without arguments won't blow up with StackOverflowError
+        adminClient.realm("test").users().search(null, 0, 10, false);
+
+        List<UserRepresentation> users = adminClient.realm("test").users().search("johnkeycloak", 0, 10, false);
+        Assert.assertTrue(users.stream().anyMatch(userRepresentation -> "johnkeycloak".equals(userRepresentation.getUsername())));
+    }
+
+
     @Test
     public void testLDAPUserRefreshCache() {
         testingClient.server().run(session -> {
@@ -1085,5 +1113,42 @@ public class LDAPProvidersIntegrationTest extends AbstractLDAPTest {
         });
 
         setTimeOffset(0);
+    }
+
+    @Test
+    public void testEmailVerifiedFromImport(){
+
+        // Test trusted email option
+        testingClient.server().run(session -> {
+            LDAPTestContext ctx = LDAPTestContext.init(session);
+            ctx.getLdapModel().put(LDAPConstants.TRUST_EMAIL, "true");
+            ctx.getRealm().updateComponent(ctx.getLdapModel());
+            LDAPTestUtils.addLDAPUser(ctx.getLdapProvider(), ctx.getRealm(), "testUserVerified", "John", "Email", "john@test.com", null, "1234");
+        });
+        loginPage.open();
+        loginPage.login("testuserVerified", "password");
+
+        testingClient.server().run(session -> {
+            RealmModel appRealm = session.realms().getRealmByName(TEST_REALM_NAME);
+            List<UserModel> userVerified = session.users().searchForUser("john@test.com", appRealm);
+            Assert.assertTrue(userVerified.get(0).isEmailVerified());
+        });
+
+        //Test untrusted email option 
+        testingClient.server().run(session -> {
+            LDAPTestContext ctx = LDAPTestContext.init(session);
+            ctx.getLdapModel().put(LDAPConstants.TRUST_EMAIL, "false");
+            ctx.getRealm().updateComponent(ctx.getLdapModel());
+            LDAPTestUtils.addLDAPUser(ctx.getLdapProvider(), ctx.getRealm(), "testUserNotVerified", "John", "Email", "john2@test.com", null, "1234");
+        });
+
+        loginPage.open();
+        loginPage.login("testuserNotVerified", "password");
+
+        testingClient.server().run(session -> {
+            RealmModel appRealm = session.realms().getRealmByName(TEST_REALM_NAME);
+            List<UserModel> userNotVerified = session.users().searchForUser("john2@test.com", appRealm);
+            Assert.assertFalse(userNotVerified.get(0).isEmailVerified());
+        });
     }
 }

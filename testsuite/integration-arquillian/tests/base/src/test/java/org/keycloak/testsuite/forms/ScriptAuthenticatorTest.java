@@ -26,6 +26,7 @@ import org.junit.Rule;
 import org.junit.Test;
 import org.keycloak.authentication.authenticators.browser.ScriptBasedAuthenticatorFactory;
 import org.keycloak.authentication.authenticators.browser.UsernamePasswordFormFactory;
+import org.keycloak.common.Profile;
 import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventType;
@@ -65,8 +66,10 @@ public class ScriptAuthenticatorTest extends AbstractFlowTest {
     public static final String EXECUTION_ID = "scriptAuth";
 
     @BeforeClass
-    public static void enabled() {
-        ProfileAssume.assumePreview();
+    public static void verifyEnvironment() {
+        // TODO: we should probably enable SCRIPTS automatically when UPLOAD_SCRIPTS is enabled
+        ProfileAssume.assumeFeatureEnabled(Profile.Feature.SCRIPTS);
+        ProfileAssume.assumeFeatureEnabled(Profile.Feature.UPLOAD_SCRIPTS);
     }
 
     @Override

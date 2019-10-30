@@ -20,6 +20,7 @@ import org.jboss.logging.Logger;
 import org.jboss.resteasy.annotations.cache.NoCache;
 import org.jboss.resteasy.spi.HttpRequest;
 import org.jboss.resteasy.spi.ResteasyProviderFactory;
+import org.keycloak.OAuthErrorException;
 import org.keycloak.authentication.AuthenticationProcessor;
 import org.keycloak.authentication.authenticators.broker.AbstractIdpAuthenticator;
 import org.keycloak.authentication.authenticators.broker.util.PostBrokerLoginConstants;
@@ -32,11 +33,14 @@ import org.keycloak.broker.provider.IdentityProviderFactory;
 import org.keycloak.broker.provider.IdentityProviderMapper;
 import org.keycloak.broker.provider.util.IdentityBrokerState;
 import org.keycloak.broker.saml.SAMLEndpoint;
+import org.keycloak.broker.saml.SAMLIdentityProvider;
 import org.keycloak.broker.social.SocialIdentityProvider;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.common.util.Base64Url;
 import org.keycloak.common.util.ObjectUtil;
 import org.keycloak.common.util.Time;
+import org.keycloak.dom.saml.v2.SAML2Object;
+import org.keycloak.dom.saml.v2.protocol.StatusResponseType;
 import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventBuilder;
@@ -65,6 +69,8 @@ import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.protocol.oidc.utils.RedirectUtils;
 import org.keycloak.protocol.saml.SamlProtocol;
 import org.keycloak.protocol.saml.SamlService;
+import org.keycloak.protocol.saml.SamlSessionUtils;
+import org.keycloak.protocol.saml.preprocessor.SamlAuthenticationPreprocessor;
 import org.keycloak.provider.ProviderFactory;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.services.ErrorPage;
@@ -105,6 +111,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -436,11 +443,14 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
 
             if (authResult != null) {
                 AccessToken token = authResult.getToken();
-                String[] audience = token.getAudience();
-                ClientModel clientModel = this.realmModel.getClientByClientId(audience[0]);
+                String issuedFor = token.getIssuedFor();
+                ClientModel clientModel = this.realmModel.getClientByClientId(issuedFor);
 
                 if (clientModel == null) {
                     return badRequest("Invalid client.");
+                }
+                if (!clientModel.isEnabled()) {
+                    return badRequest("Client is disabled");
                 }
 
                 session.getContext().setClient(clientModel);
@@ -505,6 +515,13 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
 
         AuthenticationSessionModel authenticationSession = clientCode.getClientSession();
         context.setAuthenticationSession(authenticationSession);
+        
+        StatusResponseType loginResponse = (StatusResponseType) context.getContextData().get(SAMLEndpoint.SAML_LOGIN_RESPONSE);
+        if (loginResponse != null) {
+            for(Iterator<SamlAuthenticationPreprocessor> it = SamlSessionUtils.getSamlAuthenticationPreprocessorIterator(session); it.hasNext();) {
+                loginResponse = it.next().beforeProcessingLoginResponse(loginResponse, authenticationSession);
+            }
+        }
 
         session.getContext().setClient(authenticationSession.getClient());
 
@@ -551,8 +568,14 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
             username = username.trim();
             context.setModelUsername(username);
 
+            boolean forwardedPassiveLogin = "true".equals(authenticationSession.getAuthNote(AuthenticationProcessor.FORWARDED_PASSIVE_LOGIN));
             // Redirect to firstBrokerLogin after successful login and ensure that previous authentication state removed
             AuthenticationProcessor.resetFlow(authenticationSession, LoginActionsService.FIRST_BROKER_LOGIN_PATH);
+
+            // Set the FORWARDED_PASSIVE_LOGIN note (if needed) after resetting the session so it is not lost.
+            if (forwardedPassiveLogin) {
+                authenticationSession.setAuthNote(AuthenticationProcessor.FORWARDED_PASSIVE_LOGIN, "true");
+            }
 
             SerializedBrokeredIdentityContext ctx = SerializedBrokeredIdentityContext.serialize(context);
             ctx.saveToAuthenticationSession(authenticationSession, AbstractIdpAuthenticator.BROKERED_CONTEXT_NOTE);
@@ -607,7 +630,6 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
 
     private Response afterFirstBrokerLogin(ClientSessionCode<AuthenticationSessionModel> clientSessionCode) {
         AuthenticationSessionModel authSession = clientSessionCode.getClientSession();
-
         try {
             this.event.detail(Details.CODE_ID, authSession.getParentSession().getId())
                     .removeDetail("auth_method");
@@ -811,6 +833,10 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
 
         String nextRequiredAction = AuthenticationManager.nextRequiredAction(session, authSession, clientConnection, request, session.getContext().getUri(), event);
         if (nextRequiredAction != null) {
+            if ("true".equals(authSession.getAuthNote(AuthenticationProcessor.FORWARDED_PASSIVE_LOGIN))) {
+                logger.errorf("Required action %s found. Auth requests using prompt=none are incompatible with required actions", nextRequiredAction);
+                return checkPassiveLoginError(authSession, OAuthErrorException.INTERACTION_REQUIRED);
+            }
             return AuthenticationManager.redirectToRequiredActions(session, realmModel, authSession, session.getContext().getUri(), nextRequiredAction);
         } else {
             event.detail(Details.CODE_ID, authSession.getParentSession().getId());  // todo This should be set elsewhere.  find out why tests fail.  Don't know where this is supposed to be set
@@ -846,6 +872,11 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
         Response accountManagementFailedLinking = checkAccountManagementFailedLinking(clientCode.getClientSession(), message);
         if (accountManagementFailedLinking != null) {
             return accountManagementFailedLinking;
+        }
+
+        Response passiveLoginErrorReturned = checkPassiveLoginError(clientCode.getClientSession(), message);
+        if (passiveLoginErrorReturned != null) {
+            return passiveLoginErrorReturned;
         }
 
         return browserAuthentication(clientCode.getClientSession(), message);
@@ -1046,6 +1077,10 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
         SamlService samlService = (SamlService) factory.createProtocolEndpoint(realmModel, event);
         ResteasyProviderFactory.getInstance().injectProperties(samlService);
         AuthenticationSessionModel authSession = samlService.getOrCreateLoginSessionForIdpInitiatedSso(session, realmModel, oClient.get(), null);
+        if (authSession == null) {
+            event.error(Errors.INVALID_REDIRECT_URI);
+            return ParsedCodeContext.response(redirectToErrorPage(Response.Status.BAD_REQUEST, Messages.INVALID_REDIRECT_URI));
+        }
 
         return ParsedCodeContext.clientSessionCode(new ClientSessionCode<>(session, this.realmModel, authSession));
     }
@@ -1063,6 +1098,29 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
         } else {
             return null;
         }
+    }
+
+    /**
+     * Checks if specified message matches one of the passive login error messages and if it does builds a response that
+     * redirects the error back to the client.
+     *
+     * @param authSession the authentication session.
+     * @param message the error message.
+     * @return a {@code {@link Response}} that redirects the error message back to the client if the {@code message} is one
+     * of the passive login error messages, or {@code null} if it is not.
+     */
+    private Response checkPassiveLoginError(AuthenticationSessionModel authSession, String message) {
+        LoginProtocol.Error error = OAuthErrorException.LOGIN_REQUIRED.equals(message) ? LoginProtocol.Error.PASSIVE_LOGIN_REQUIRED :
+                (OAuthErrorException.INTERACTION_REQUIRED.equals(message) ? LoginProtocol.Error.PASSIVE_INTERACTION_REQUIRED : null);
+        if (error != null) {
+            LoginProtocol protocol = session.getProvider(LoginProtocol.class, authSession.getProtocol());
+            protocol.setRealm(realmModel)
+                    .setHttpHeaders(headers)
+                    .setUriInfo(session.getContext().getUri())
+                    .setEventBuilder(event);
+            return protocol.sendError(authSession, error);
+        }
+        return null;
     }
 
     private AuthenticationRequest createAuthenticationRequest(String providerId, ClientSessionCode<AuthenticationSessionModel> clientSessionCode) {
@@ -1088,6 +1146,10 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
 
     private Response redirectToErrorPage(Response.Status status, String message, Object ... parameters) {
         return redirectToErrorPage(null, status, message, null, parameters);
+    }
+
+    private Response redirectToErrorPage(Response.Status status, String message, Throwable throwable, Object ... parameters) {
+        return redirectToErrorPage(null, status, message, throwable, parameters);
     }
 
     private Response redirectToErrorPage(AuthenticationSessionModel authSession, Response.Status status, String message, Throwable throwable, Object ... parameters) {
@@ -1239,7 +1301,6 @@ public class IdentityBrokerService implements IdentityProvider.AuthenticationCal
             this.session.getTransactionManager().rollback();
         }
     }
-
 
     private static class ParsedCodeContext {
         private ClientSessionCode<AuthenticationSessionModel> clientSessionCode;

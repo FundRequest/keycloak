@@ -1,20 +1,21 @@
 package org.keycloak.testsuite.authz;
 
-import org.junit.BeforeClass;
+import static org.keycloak.common.Profile.Feature.UPLOAD_SCRIPTS;
+
+import org.junit.Before;
 import org.keycloak.jose.jws.JWSInput;
 import org.keycloak.jose.jws.JWSInputException;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.testsuite.AbstractKeycloakTest;
-import org.keycloak.testsuite.ProfileAssume;
 
 /**
  * @author mhajas
  */
 public abstract class AbstractAuthzTest extends AbstractKeycloakTest {
 
-    @BeforeClass
-    public static void enabled() {
-        ProfileAssume.assumePreview();
+    @Before
+    public void onBefore() {
+        enableFeature(UPLOAD_SCRIPTS);
     }
 
     protected AccessToken toAccessToken(String rpt) {

@@ -30,6 +30,7 @@ import org.keycloak.models.Constants;
 import org.keycloak.models.LDAPConstants;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.DefaultAuthenticationFlows;
+import org.keycloak.protocol.oidc.OIDCLoginProtocolFactory;
 import org.keycloak.representations.AccessToken;
 import org.keycloak.representations.idm.AuthenticationExecutionExportRepresentation;
 import org.keycloak.representations.idm.AuthenticationFlowRepresentation;
@@ -41,8 +42,9 @@ import org.keycloak.representations.idm.ProtocolMapperRepresentation;
 import org.keycloak.representations.idm.RealmRepresentation;
 import org.keycloak.representations.idm.RequiredActionProviderRepresentation;
 import org.keycloak.representations.idm.RoleRepresentation;
-import org.keycloak.representations.idm.authorization.PolicyRepresentation;
+import org.keycloak.representations.idm.authorization.DecisionStrategy;
 import org.keycloak.representations.idm.authorization.ResourceRepresentation;
+import org.keycloak.representations.idm.authorization.ResourceServerRepresentation;
 import org.keycloak.storage.UserStorageProvider;
 import org.keycloak.testsuite.AbstractKeycloakTest;
 import org.keycloak.testsuite.Assert;
@@ -58,10 +60,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
+
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.is;
 
-import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -69,12 +71,10 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
-import org.keycloak.common.Profile;
 import static org.keycloak.models.AccountRoles.MANAGE_ACCOUNT;
 import static org.keycloak.models.AccountRoles.MANAGE_ACCOUNT_LINKS;
 import static org.keycloak.models.Constants.ACCOUNT_MANAGEMENT_CLIENT_ID;
 import static org.keycloak.testsuite.Assert.assertNames;
-import org.keycloak.testsuite.ProfileAssume;
 import static org.keycloak.testsuite.auth.page.AuthRealm.MASTER;
 
 /**
@@ -86,7 +86,6 @@ public abstract class AbstractMigrationTest extends AbstractKeycloakTest {
     public static final String MIGRATION2 = "Migration2";
     protected RealmResource migrationRealm;
     protected RealmResource migrationRealm2;
-    protected RealmResource migrationRealm3;
     protected RealmResource masterRealm;
 
     protected void testMigratedData() {
@@ -107,6 +106,7 @@ public abstract class AbstractMigrationTest extends AbstractKeycloakTest {
 
         if (supportsAuthzService) {
             expectedClientIds.add("authz-servlet");
+            expectedClientIds.add("client-with-template");
         }
 
         assertNames(migrationRealm.clients().findAll(), expectedClientIds.toArray(new String[expectedClientIds.size()]));
@@ -212,6 +212,7 @@ public abstract class AbstractMigrationTest extends AbstractKeycloakTest {
     protected void testMigrationTo4_0_0() {
         testRealmDefaultClientScopes(this.masterRealm);
         testRealmDefaultClientScopes(this.migrationRealm);
+        testClientDefaultClientScopes(this.migrationRealm);
         testOfflineScopeAddedToClient();
     }
 
@@ -220,6 +221,41 @@ public abstract class AbstractMigrationTest extends AbstractKeycloakTest {
 
         if (supportsAuthzService) {
             testResourceWithMultipleUris();
+        }
+    }
+
+    protected void testMigrationTo4_6_0(boolean supportsAuthzService, boolean checkMigrationData) {
+        if (supportsAuthzService && checkMigrationData) {
+            testGroupPolicyTypeFineGrainedAdminPermission();
+        }
+
+        // NOTE: Fact that 'roles' and 'web-origins' scope were added was tested in testMigrationTo4_0_0 already
+        testRolesAndWebOriginsScopesAddedToClient();
+    }
+
+    protected void testMigrationTo6_0_0() {
+        // check that all expected scopes exist in the migrated realm.
+        testRealmDefaultClientScopes(migrationRealm);
+        // check that the 'microprofile-jwt' scope was added to the migrated clients.
+        testMicroprofileJWTScopeAddedToClient();
+    }
+
+    private void testDecisionStrategySetOnResourceServer() {
+        ClientsResource clients = migrationRealm.clients();
+        ClientRepresentation clientRepresentation = clients.findByClientId("authz-servlet").get(0);
+        ResourceServerRepresentation settings = clients.get(clientRepresentation.getId()).authorization().getSettings();
+        assertEquals(DecisionStrategy.UNANIMOUS, settings.getDecisionStrategy());
+    }
+
+    private void testGroupPolicyTypeFineGrainedAdminPermission() {
+        ClientsResource clients = migrationRealm.clients();
+        ClientRepresentation clientRepresentation = clients.findByClientId("realm-management").get(0);
+        List<ResourceRepresentation> resources = clients.get(clientRepresentation.getId()).authorization().resources().resources();
+
+        assertEquals(5, resources.size());
+
+        for (ResourceRepresentation resource : resources) {
+            assertEquals("Group", resource.getType());
         }
     }
 
@@ -339,24 +375,7 @@ public abstract class AbstractMigrationTest extends AbstractKeycloakTest {
         }
     }
 
-    protected void testDroolsToRulesPolicyTypeMigration() {
-        log.info("testing drools to rules in authorization services");
-        List<ClientRepresentation> client = migrationRealm3.clients().findByClientId("photoz-restful-api");
-
-        assertEquals(1, client.size());
-
-        ClientRepresentation representation = client.get(0);
-
-        List<PolicyRepresentation> policies = migrationRealm3.clients().get(representation.getId()).authorization().policies().policies();
-
-        List<PolicyRepresentation> migratedRulesPolicies = policies.stream().filter(policyRepresentation -> "rules".equals(policyRepresentation.getType())).collect(Collectors.toList());
-
-        assertEquals(1, migratedRulesPolicies.size());
-    }
-
     private void testResourceWithMultipleUris() {
-        ProfileAssume.assumeFeatureEnabled(Profile.Feature.AUTHORIZATION);
-        
         ClientsResource clients = migrationRealm.clients();
         ClientRepresentation clientRepresentation = clients.findByClientId("authz-servlet").get(0);
         ResourceRepresentation resource = clients.get(clientRepresentation.getId()).authorization().resources().findByName("Protected Resource").get(0);
@@ -459,24 +478,25 @@ public abstract class AbstractMigrationTest extends AbstractKeycloakTest {
     }
 
     protected void testOfflineTokenLogin() throws Exception {
-        if (isImportMigrationMode()) {
-            log.info("Skip offline token login test in the 'import' migrationMode");
-        } else {
-            log.info("test login with old offline token");
-            String oldOfflineToken = suiteContext.getMigrationContext().loadOfflineToken();
-            Assert.assertNotNull(oldOfflineToken);
+        log.info("test login with old offline token");
+        String oldOfflineToken = suiteContext.getMigrationContext().loadOfflineToken();
+        Assert.assertNotNull(oldOfflineToken);
 
-            oauth.realm(MIGRATION);
-            oauth.clientId("migration-test-client");
-            OAuthClient.AccessTokenResponse response = oauth.doRefreshTokenRequest(oldOfflineToken, "b2c07929-69e3-44c6-8d7f-76939000b3e4");
-            AccessToken accessToken = oauth.verifyToken(response.getAccessToken());
-            assertEquals("migration-test-user", accessToken.getPreferredUsername());
-        }
+        oauth.realm(MIGRATION);
+        oauth.clientId("migration-test-client");
+        OAuthClient.AccessTokenResponse response = oauth.doRefreshTokenRequest(oldOfflineToken, "b2c07929-69e3-44c6-8d7f-76939000b3e4");
+        AccessToken accessToken = oauth.verifyToken(response.getAccessToken());
+        assertEquals("migration-test-user", accessToken.getPreferredUsername());
     }
 
     private void testRealmDefaultClientScopes(RealmResource realm) {
         log.info("Testing default client scopes created in realm: " + realm.toRepresentation().getRealm());
         ExportImportUtil.testRealmDefaultClientScopes(realm);
+    }
+
+    private void testClientDefaultClientScopes(RealmResource realm) {
+        log.info("Testing default client scopes transferred from client scope in realm: " + realm.toRepresentation().getRealm());
+        ExportImportUtil.testClientDefaultClientScopes(realm);
     }
 
     private void testOfflineScopeAddedToClient() {
@@ -494,6 +514,41 @@ public abstract class AbstractMigrationTest extends AbstractKeycloakTest {
             Assert.fail("Offline_access not found as optional scope of client migration-test-client");
         }
 
+    }
+
+    private void testRolesAndWebOriginsScopesAddedToClient() {
+        log.infof("Testing roles and web-origins default scopes present in realm %s for client migration-test-client", migrationRealm.toRepresentation().getRealm());
+
+        List<ClientScopeRepresentation> defaultClientScopes = ApiUtil.findClientByClientId(this.migrationRealm, "migration-test-client").getDefaultClientScopes();
+
+        Set<String> defaultClientScopeNames = defaultClientScopes.stream()
+                .map(ClientScopeRepresentation::getName)
+                .collect(Collectors.toSet());
+
+        if (!defaultClientScopeNames.contains(OIDCLoginProtocolFactory.ROLES_SCOPE)) {
+            Assert.fail("Client scope 'roles' not found as default scope of client migration-test-client");
+        }
+        if (!defaultClientScopeNames.contains(OIDCLoginProtocolFactory.WEB_ORIGINS_SCOPE)) {
+            Assert.fail("Client scope 'web-origins' not found as default scope of client migration-test-client");
+        }
+
+    }
+
+    /**
+     * Checks if the {@code microprofile-jwt} optional client scope has been added to the clients.
+     */
+    private void testMicroprofileJWTScopeAddedToClient() {
+        log.infof("Testing microprofile-jwt optional scope present in realm %s for client migration-test-client", migrationRealm.toRepresentation().getRealm());
+
+        List<ClientScopeRepresentation> optionalClientScopes = ApiUtil.findClientByClientId(this.migrationRealm, "migration-test-client").getOptionalClientScopes();
+
+        Set<String> defaultClientScopeNames = optionalClientScopes.stream()
+                .map(ClientScopeRepresentation::getName)
+                .collect(Collectors.toSet());
+
+        if (!defaultClientScopeNames.contains(OIDCLoginProtocolFactory.MICROPROFILE_JWT_SCOPE)) {
+            Assert.fail("Client scope 'microprofile-jwt' not found as optional scope of client migration-test-client");
+        }
     }
 
     private void testRequiredActionsPriority(RealmResource... realms) {
@@ -518,15 +573,6 @@ public abstract class AbstractMigrationTest extends AbstractKeycloakTest {
         }
     }
 
-    protected String getMigrationMode() {
-        return System.getProperty("migration.mode");
-    }
-
-    protected boolean isImportMigrationMode() {
-        String mode = getMigrationMode();
-        return "import".equals(mode);
-    }
-
     protected void testMigrationTo2_x() throws Exception {
         testMigrationTo2_0_0();
         testMigrationTo2_1_0();
@@ -545,12 +591,27 @@ public abstract class AbstractMigrationTest extends AbstractKeycloakTest {
         testMigrationTo3_4_2();
     }
 
-    protected void testMigrationTo4_x(boolean supportsAuthzServices) {
+    protected void testMigrationTo4_x(boolean supportsAuthzServices, boolean checkMigrationData) {
         testMigrationTo4_0_0();
         testMigrationTo4_2_0(supportsAuthzServices);
+        testMigrationTo4_6_0(supportsAuthzServices, checkMigrationData);
     }
 
     protected void testMigrationTo4_x() {
-        testMigrationTo4_x(true);
+        testMigrationTo4_x(true, true);
+    }
+
+    protected void testMigrationTo5_x() {
+        // so far nothing
+    }
+
+    protected void testMigrationTo6_x() {
+        testMigrationTo6_0_0();
+    }
+
+    protected void testMigrationTo7_x(boolean supportedAuthzServices) {
+        if (supportedAuthzServices) {
+            testDecisionStrategySetOnResourceServer();
+        }
     }
 }

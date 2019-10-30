@@ -76,6 +76,7 @@ import org.openqa.selenium.WebDriver;
 import javax.mail.MessagingException;
 import javax.mail.internet.MimeMessage;
 import javax.ws.rs.ClientErrorException;
+import javax.ws.rs.NotFoundException;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriBuilder;
 import java.io.IOException;
@@ -143,11 +144,18 @@ public class UserTest extends AbstractAdminTest {
     }
 
     private String createUser(UserRepresentation userRep) {
+        return createUser(userRep, true);
+    }
+    
+    private String createUser(UserRepresentation userRep, boolean assertAdminEvent) {
         Response response = realm.users().create(userRep);
         String createdId = ApiUtil.getCreatedId(response);
         response.close();
 
-        assertAdminEvents.assertEvent(realmId, OperationType.CREATE, AdminEventPaths.userResourcePath(createdId), userRep, ResourceType.USER);
+        if (assertAdminEvent) {
+            assertAdminEvents.assertEvent(realmId, OperationType.CREATE, AdminEventPaths.userResourcePath(createdId), userRep,
+                    ResourceType.USER);
+        }
 
         getCleanup().addUserId(createdId);
 
@@ -227,6 +235,34 @@ public class UserTest extends AbstractAdminTest {
         assertEquals(99, credentialHashed.getPeriod());
         assertEquals("theSalt", new String(credentialHashed.getSalt()));
         assertEquals(CredentialRepresentation.PASSWORD, credentialHashed.getType());
+    }
+    
+    @Test
+    public void updateUserWithHashedCredentials(){
+        String userId = createUser("user_hashed_creds", "user_hashed_creds@localhost");
+
+        CredentialRepresentation hashedPassword = new CredentialRepresentation();
+        hashedPassword.setAlgorithm("pbkdf2-sha256");
+        hashedPassword.setCreatedDate(1001l);
+        hashedPassword.setHashIterations(27500);
+        hashedPassword.setHashedSaltedValue("uskEPZWMr83pl2mzNB95SFXfIabe2UH9ClENVx/rrQqOjFEjL2aAOGpWsFNNF3qoll7Qht2mY5KxIDm3Rnve2w==");
+        hashedPassword.setSalt("u1VXYxqVfWOzHpF2bGSLyA==");
+        hashedPassword.setType(CredentialRepresentation.PASSWORD);
+        
+        UserRepresentation userRepresentation = new UserRepresentation();
+        userRepresentation.setCredentials(Collections.singletonList(hashedPassword));
+        
+        realm.users().get(userId).update(userRepresentation);
+
+        String accountUrl = RealmsResource.accountUrl(UriBuilder.fromUri(getAuthServerRoot())).build(REALM_NAME).toString();
+
+        driver.navigate().to(accountUrl);
+
+        assertEquals("Log In", PageUtils.getPageTitle(driver));
+
+        loginPage.login("user_hashed_creds", "admin");
+
+        assertTrue(driver.getTitle().contains("Account Management"));
     }
 
     @Test
@@ -681,7 +717,7 @@ public class UserTest extends AbstractAdminTest {
             assertEquals(400, e.getResponse().getStatus());
 
             ErrorRepresentation error = e.getResponse().readEntity(ErrorRepresentation.class);
-            Assert.assertEquals("invalidClientId not enabled", error.getErrorMessage());
+            Assert.assertEquals("Client doesn't exist", error.getErrorMessage());
         }
     }
 
@@ -1080,7 +1116,7 @@ public class UserTest extends AbstractAdminTest {
             assertEquals(400, e.getResponse().getStatus());
 
             ErrorRepresentation error = e.getResponse().readEntity(ErrorRepresentation.class);
-            Assert.assertEquals("invalidClientId not enabled", error.getErrorMessage());
+            Assert.assertEquals("Client doesn't exist", error.getErrorMessage());
         }
 
         user.sendVerifyEmail();
@@ -1312,7 +1348,7 @@ public class UserTest extends AbstractAdminTest {
 
         // Remove UPDATE_PASSWORD default action
         updatePasswordReqAction = realm.flows().getRequiredAction(UserModel.RequiredAction.UPDATE_PASSWORD.toString());
-        updatePasswordReqAction.setDefaultAction(true);
+        updatePasswordReqAction.setDefaultAction(false);
         realm.flows().updateRequiredAction(UserModel.RequiredAction.UPDATE_PASSWORD.toString(), updatePasswordReqAction);
         assertAdminEvents.assertEvent(realmId, OperationType.UPDATE, AdminEventPaths.authRequiredActionPath(UserModel.RequiredAction.UPDATE_PASSWORD.toString()), updatePasswordReqAction, ResourceType.REQUIRED_ACTION);
     }
@@ -1368,7 +1404,7 @@ public class UserTest extends AbstractAdminTest {
 
         // List realm roles
         assertNames(roles.realmLevel().listAll(), "realm-role", "realm-composite", "user", "offline_access", Constants.AUTHZ_UMA_AUTHORIZATION);
-        assertNames(roles.realmLevel().listAvailable(), "admin", "customer-user-premium", "realm-composite-role", "sample-realm-role");
+        assertNames(roles.realmLevel().listAvailable(), "admin", "customer-user-premium", "realm-composite-role", "sample-realm-role", "attribute-role");
         assertNames(roles.realmLevel().listEffective(), "realm-role", "realm-composite", "realm-child", "user", "offline_access", Constants.AUTHZ_UMA_AUTHORIZATION);
 
         // List client roles
@@ -1430,6 +1466,40 @@ public class UserTest extends AbstractAdminTest {
         assertEquals(100, result.size());
         for (UserRepresentation user : result) {
             assertThat(user.getAttributes(), Matchers.nullValue());
+        }
+    }
+    
+    @Test
+    public void testAccessUserFromOtherRealm() {
+        RealmRepresentation firstRealm = new RealmRepresentation();
+        
+        firstRealm.setRealm("first-realm");
+        
+        adminClient.realms().create(firstRealm);
+        
+        realm = adminClient.realm(firstRealm.getRealm());
+        realmId = realm.toRepresentation().getId();
+
+        UserRepresentation firstUser = new UserRepresentation();
+
+        firstUser.setUsername("first");
+        firstUser.setEmail("first@first-realm.org");
+        
+        firstUser.setId(createUser(firstUser, false));
+
+        RealmRepresentation secondRealm = new RealmRepresentation();
+
+        secondRealm.setRealm("second-realm");
+
+        adminClient.realms().create(secondRealm);
+
+        adminClient.realm(firstRealm.getRealm()).users().get(firstUser.getId()).update(firstUser);
+
+        try {
+            adminClient.realm(secondRealm.getRealm()).users().get(firstUser.getId()).toRepresentation();
+            fail("Should not have access to firstUser from another realm");
+        } catch (NotFoundException nfe) {
+            // ignore
         }
     }
 

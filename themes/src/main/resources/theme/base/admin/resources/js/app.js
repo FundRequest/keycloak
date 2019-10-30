@@ -657,9 +657,6 @@ module.config([ '$routeProvider', function($routeProvider) {
                 },
                 user : function(UserLoader) {
                     return UserLoader();
-                },
-                groups : function(GroupListLoader) {
-                    return GroupListLoader();
                 }
             },
             controller : 'UserGroupMembershipCtrl'
@@ -788,6 +785,24 @@ module.config([ '$routeProvider', function($routeProvider) {
             },
             controller : 'RoleDetailCtrl'
         })
+        .when('/realms/:realm/roles/:role/role-attributes', {
+            templateUrl : resourceUrl + '/partials/role-attributes.html',
+            resolve : {
+                realm : function(RealmLoader) {
+                    return RealmLoader();
+                },
+                role : function(RoleLoader) {
+                    return RoleLoader();
+                },
+                roles : function(RoleListLoader) {
+                    return RoleListLoader();
+                },
+                clients : function(ClientListLoader) {
+                    return ClientListLoader();
+                }
+            },
+            controller : 'RoleDetailCtrl'
+        })
         .when('/realms/:realm/roles/:role/users', {
         	templateUrl : resourceUrl + '/partials/realm-role-users.html',
         	resolve : {
@@ -892,9 +907,6 @@ module.config([ '$routeProvider', function($routeProvider) {
             resolve : {
                 realm : function(RealmLoader) {
                     return RealmLoader();
-                },
-                groups : function(GroupListLoader) {
-                    return GroupListLoader();
                 }
             },
             controller : 'DefaultGroupsCtrl'
@@ -942,6 +954,42 @@ module.config([ '$routeProvider', function($routeProvider) {
                 }
             },
             controller : 'ClientRoleDetailCtrl'
+        })
+        .when('/realms/:realm/clients/:client/roles/:role/role-attributes', {
+            templateUrl : resourceUrl + '/partials/client-role-attributes.html',
+            resolve : {
+                realm : function(RealmLoader) {
+                    return RealmLoader();
+                },
+                client : function(ClientLoader) {
+                    return ClientLoader();
+                },
+                role : function(ClientRoleLoader) {
+                    return ClientRoleLoader();
+                },
+                roles : function(RoleListLoader) {
+                    return RoleListLoader();
+                },
+                clients : function(ClientListLoader) {
+                    return ClientListLoader();
+                }
+            },
+            controller : 'ClientRoleDetailCtrl'
+        })
+        .when('/realms/:realm/clients/:client/roles/:role/users', {
+            templateUrl : resourceUrl + '/partials/client-role-users.html',
+            resolve : {
+                realm : function(RealmLoader) {
+                    return RealmLoader();
+                },
+                client : function(ClientLoader) {
+                    return ClientLoader();
+                },
+                role : function(ClientRoleLoader) {
+                    return ClientRoleLoader();
+                }
+            },
+            controller : 'ClientRoleMembersCtrl'
         })
         .when('/realms/:realm/clients/:client/mappers', {
             templateUrl : resourceUrl + '/partials/client-mappers.html',
@@ -1960,6 +2008,18 @@ module.config([ '$routeProvider', function($routeProvider) {
             },
             controller : 'RealmOtpPolicyCtrl'
         })
+        .when('/realms/:realm/authentication/webauthn-policy', {
+            templateUrl : resourceUrl + '/partials/webauthn-policy.html',
+            resolve : {
+                realm : function(RealmLoader) {
+                    return RealmLoader();
+                },
+                serverInfo : function(ServerInfo) {
+                    return ServerInfo.delay;
+                }
+            },
+            controller : 'RealmWebAuthnPolicyCtrl'
+        })
         .when('/realms/:realm/authentication/flows/:flow/config/:provider/:config', {
             templateUrl : resourceUrl + '/partials/authenticator-config.html',
             resolve : {
@@ -2689,6 +2749,8 @@ module.controller('ProviderConfigCtrl', function ($modal, $scope, ComponentUtils
         })
     }
 
+    ComponentUtils.convertAllMultivaluedStringValuesToList($scope.properties, $scope.config);
+
     ComponentUtils.addLastEmptyValueToMultivaluedLists($scope.properties, $scope.config);
 
     $scope.addValueToMultivalued = function(optionName) {
@@ -3049,6 +3111,18 @@ module.controller('PagingCtrl', function ($scope) {
     };
 });
 
+// Provides a component for injection with utility methods for manipulating strings
+module.factory('KcStrings', function () {
+    var instance = {};
+    
+    // some IE versions do not support string.endsWith method, this method should be used as an alternative for cross-browser compatibility
+    instance.endsWith = function(source, suffix) {
+        return source.indexOf(suffix, source.length - suffix.length) !== -1;
+    };
+    
+    return instance;
+});
+
 module.directive('kcPaging', function () {
     return {
         scope: {
@@ -3096,9 +3170,54 @@ module.directive('kcPassword', function ($compile, Notifications) {
     return {
         restrict: 'A',
         link: function ($scope, elem, attr, ctrl) {
+            function toggleMask(evt) {
+                if(elem.hasClass('password-conceal')) {
+                    view();
+                } else {
+                    conceal();
+                }
+            }
+
+            function view() {
+                elem.removeClass('password-conceal');
+
+                var t = elem.next().children().first();
+                t.addClass('fa-eye-slash');
+                t.removeClass('fa-eye');
+            }
+
+            function conceal() {
+                elem.addClass('password-conceal');
+
+                var t = elem.next().children().first();
+                t.removeClass('fa-eye-slash');
+                t.addClass('fa-eye');
+            }
+
             elem.addClass("password-conceal");
             elem.attr("type","text");
             elem.attr("autocomplete", "off");
+
+            var p = elem.parent();
+
+            var inputGroup = $('<div class="input-group"></div>');
+            var eye = $('<span class="input-group-addon btn btn-default"><span class="fa fa-eye"></span></span>')
+                        .on('click', toggleMask);
+
+            $scope.$watch(attr.ngModel, function(v) {
+                if (v && v == '**********') {
+                    elem.next().addClass('disabled')
+                } else if (v && v.indexOf('${v') == 0) {
+                    elem.next().addClass('disabled')
+                    view();
+                } else {
+                    elem.next().removeClass('disabled')
+                }
+            })
+
+            elem.detach().appendTo(inputGroup);
+            inputGroup.append(eye);
+            p.append(inputGroup);
         }
     }
 });

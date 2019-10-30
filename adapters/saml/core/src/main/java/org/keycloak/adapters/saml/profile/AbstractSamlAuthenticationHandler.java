@@ -77,6 +77,7 @@ import java.security.Signature;
 import java.security.SignatureException;
 import java.util.*;
 
+import javax.xml.datatype.XMLGregorianCalendar;
 import javax.xml.namespace.QName;
 
 import org.keycloak.dom.saml.v2.SAML2Object;
@@ -84,6 +85,7 @@ import org.keycloak.dom.saml.v2.protocol.ExtensionsType;
 import org.keycloak.rotation.KeyLocator;
 import org.keycloak.saml.processing.core.util.KeycloakKeySamlExtensionGenerator;
 import org.keycloak.saml.processing.core.util.XMLEncryptionUtil;
+import org.keycloak.saml.validators.ConditionsValidator;
 import org.keycloak.saml.validators.DestinationValidator;
 
 /**
@@ -342,7 +344,18 @@ public abstract class AbstractSamlAuthenticationHandler implements SamlAuthentic
         }
         try {
             assertion = AssertionUtil.getAssertion(responseHolder, responseType, deployment.getDecryptionKey());
-            if (AssertionUtil.hasExpired(assertion)) {
+            ConditionsValidator.Builder cvb = new ConditionsValidator.Builder(assertion.getID(), assertion.getConditions(), destinationValidator);
+            try {
+                cvb.clockSkewInMillis(deployment.getIDP().getAllowedClockSkew());
+                cvb.addAllowedAudience(URI.create(deployment.getEntityID()));
+                if (responseType.getDestination() != null) {
+                  // getDestination has been validated to match request URL already so it matches SAML endpoint
+                  cvb.addAllowedAudience(URI.create(responseType.getDestination()));
+                }
+            } catch (IllegalArgumentException ex) {
+                // warning has been already emitted in DeploymentBuilder
+            }
+            if (! cvb.build().isValid()) {
                 return initiateLogin();
             }
         } catch (Exception e) {
@@ -364,9 +377,11 @@ public abstract class AbstractSamlAuthenticationHandler implements SamlAuthentic
             return AuthOutcome.FAILED;
         }
 
+        Element assertionElement = null;
         if (deployment.getIDP().getSingleSignOnService().validateAssertionSignature()) {
             try {
-                if (!AssertionUtil.isSignatureValid(getAssertionFromResponse(responseHolder), deployment.getIDP().getSignatureValidationKeyLocator())) {
+                assertionElement = getAssertionFromResponse(responseHolder);
+                if (!AssertionUtil.isSignatureValid(assertionElement, deployment.getIDP().getSignatureValidationKeyLocator())) {
                     log.error("Failed to verify saml assertion signature");
 
                     challenge = new AuthChallenge() {
@@ -412,7 +427,7 @@ public abstract class AbstractSamlAuthenticationHandler implements SamlAuthentic
         NameIDType subjectNameID = subType == null ? null : (NameIDType) subType.getBaseID();
         String principalName = subjectNameID == null ? null : subjectNameID.getValue();
 
-        final Set<String> roles = new HashSet<>();
+        Set<String> roles = new HashSet<>();
         MultivaluedHashMap<String, String> attributes = new MultivaluedHashMap<>();
         MultivaluedHashMap<String, String> friendlyAttributes = new MultivaluedHashMap<>();
 
@@ -451,10 +466,6 @@ public abstract class AbstractSamlAuthenticationHandler implements SamlAuthentic
             }
         }
 
-        // roles should also be there as regular attributes
-        // this mainly required for elytron and its ABAC nature
-        attributes.put(DEFAULT_ROLE_ATTRIBUTE_NAME, new ArrayList<>(roles));
-
         if (deployment.getPrincipalNamePolicy() == SamlDeployment.PrincipalNamePolicy.FROM_ATTRIBUTE) {
             if (deployment.getPrincipalAttributeName() != null) {
                 String attribute = attributes.getFirst(deployment.getPrincipalAttributeName());
@@ -465,6 +476,15 @@ public abstract class AbstractSamlAuthenticationHandler implements SamlAuthentic
                 }
             }
         }
+
+        // use the configured role mappings provider to map roles if necessary.
+        if (deployment.getRoleMappingsProvider() != null)  {
+            roles = deployment.getRoleMappingsProvider().map(principalName, roles);
+        }
+
+        // roles should also be there as regular attributes
+        // this mainly required for elytron and its ABAC nature
+        attributes.put(DEFAULT_ROLE_ATTRIBUTE_NAME, new ArrayList<>(roles));
 
         AuthnStatementType authn = null;
         for (Object statement : assertion.getStatements()) {
@@ -477,10 +497,16 @@ public abstract class AbstractSamlAuthenticationHandler implements SamlAuthentic
 
         URI nameFormat = subjectNameID == null ? null : subjectNameID.getFormat();
         String nameFormatString = nameFormat == null ? JBossSAMLURIConstants.NAMEID_FORMAT_UNSPECIFIED.get() : nameFormat.toString();
-        final SamlPrincipal principal = new SamlPrincipal(assertion, principalName, principalName, nameFormatString, attributes, friendlyAttributes);
-        String index = authn == null ? null : authn.getSessionIndex();
-        final String sessionIndex = index;
-        SamlSession account = new SamlSession(principal, roles, sessionIndex);
+        if (deployment.isKeepDOMAssertion() && assertionElement == null) {
+            // obtain the assertion from the response to add the DOM document to the principal
+            assertionElement = getAssertionFromResponseNoException(responseHolder);
+        }
+        final SamlPrincipal principal = new SamlPrincipal(assertion,
+                deployment.isKeepDOMAssertion()? getAssertionDocumentFromElement(assertionElement) : null,
+                principalName, principalName, nameFormatString, attributes, friendlyAttributes);
+        final String sessionIndex = authn == null ? null : authn.getSessionIndex();
+        final XMLGregorianCalendar sessionNotOnOrAfter = authn == null ? null : authn.getSessionNotOnOrAfter();
+        SamlSession account = new SamlSession(principal, roles, sessionIndex, sessionNotOnOrAfter);
         sessionStore.saveAccount(account);
         onCreateSession.onSessionCreated(account);
 
@@ -516,6 +542,30 @@ public abstract class AbstractSamlAuthenticationHandler implements SamlAuthentic
             return XMLEncryptionUtil.decryptElementInDocument(encryptedAssertionDocument, deployment.getDecryptionKey());
         }
         return DocumentUtil.getElement(responseHolder.getSamlDocument(), new QName(JBossSAMLConstants.ASSERTION.get()));
+    }
+
+    private Element getAssertionFromResponseNoException(final SAMLDocumentHolder responseHolder) {
+        try {
+            return getAssertionFromResponse(responseHolder);
+        } catch (ConfigurationException|ProcessingException e) {
+            log.warn("Cannot obtain DOM assertion element", e);
+            return null;
+        }
+    }
+
+    private Document getAssertionDocumentFromElement(final Element assertionElement) {
+        if (assertionElement == null) {
+            return null;
+        }
+        try {
+            Document assertionDoc = DocumentUtil.createDocument();
+            assertionDoc.adoptNode(assertionElement);
+            assertionDoc.appendChild(assertionElement);
+            return assertionDoc;
+        } catch (ConfigurationException e) {
+            log.warn("Cannot obtain DOM assertion document", e);
+            return null;
+        }
     }
 
     private String getAttributeValue(Object attrValue) {

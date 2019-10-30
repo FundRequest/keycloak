@@ -16,27 +16,38 @@
  */
 package org.keycloak.testsuite.admin.client.authorization;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.fail;
-
-import java.util.Collections;
-
-import javax.ws.rs.NotFoundException;
-import javax.ws.rs.core.Response;
-
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.keycloak.admin.client.resource.AuthorizationResource;
 import org.keycloak.admin.client.resource.RulePoliciesResource;
 import org.keycloak.admin.client.resource.RulePolicyResource;
-import org.keycloak.common.Version;
+import org.keycloak.common.Profile;
 import org.keycloak.representations.idm.authorization.DecisionStrategy;
 import org.keycloak.representations.idm.authorization.Logic;
 import org.keycloak.representations.idm.authorization.RulePolicyRepresentation;
+import org.keycloak.testsuite.ProfileAssume;
+import org.keycloak.testsuite.arquillian.annotation.RestartContainer;
+import org.keycloak.testsuite.util.ContainerAssume;
+
+import javax.ws.rs.NotFoundException;
+import javax.ws.rs.core.Response;
+import java.util.Collections;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 
 /**
  * @author <a href="mailto:psilva@redhat.com">Pedro Igor</a>
  */
+@RestartContainer(enableFeatures = Profile.Feature.AUTHZ_DROOLS_POLICY)
 public class RulesPolicyManagementTest extends AbstractPolicyManagementTest {
+
+    @BeforeClass
+    public static void verifyEnvironment() {
+        ContainerAssume.assumeNotAuthServerUndertow();
+        ProfileAssume.assumeFeatureEnabled(Profile.Feature.AUTHZ_DROOLS_POLICY);
+        ContainerAssume.assumeNotAuthServerRemote();
+    }
 
     @Test
     public void testCreate() {
@@ -73,18 +84,20 @@ public class RulesPolicyManagementTest extends AbstractPolicyManagementTest {
         RulePolicyRepresentation representation = createDefaultRepresentation("Delete Rule Policy");
 
         RulePoliciesResource policies = authorization.policies().rule();
-        Response response = policies.create(representation);
-        RulePolicyRepresentation created = response.readEntity(RulePolicyRepresentation.class);
 
-        policies.findById(created.getId()).remove();
+        try (Response response = policies.create(representation)) {
+            RulePolicyRepresentation created = response.readEntity(RulePolicyRepresentation.class);
 
-        RulePolicyResource removed = policies.findById(created.getId());
+            policies.findById(created.getId()).remove();
 
-        try {
-            removed.toRepresentation();
-            fail("Policy not removed");
-        } catch (NotFoundException ignore) {
+            RulePolicyResource removed = policies.findById(created.getId());
 
+            try {
+                removed.toRepresentation();
+                fail("Policy not removed");
+            } catch (NotFoundException ignore) {
+
+            }
         }
     }
 
@@ -108,15 +121,17 @@ public class RulesPolicyManagementTest extends AbstractPolicyManagementTest {
 
     private void assertCreated(AuthorizationResource authorization, RulePolicyRepresentation representation) {
         RulePoliciesResource permissions = authorization.policies().rule();
-        Response response = permissions.create(representation);
-        RulePolicyRepresentation created = response.readEntity(RulePolicyRepresentation.class);
-        RulePolicyResource permission = permissions.findById(created.getId());
-        assertRepresentation(representation, permission);
+
+        try (Response response = permissions.create(representation)) {
+            RulePolicyRepresentation created = response.readEntity(RulePolicyRepresentation.class);
+            RulePolicyResource permission = permissions.findById(created.getId());
+            assertRepresentation(representation, permission);
+        }
     }
 
     private void assertRepresentation(RulePolicyRepresentation expected, RulePolicyResource policy) {
         RulePolicyRepresentation actual = policy.toRepresentation();
-        assertRepresentation(expected, actual, () -> policy.resources(), () -> Collections.emptyList(), () -> policy.associatedPolicies());
+        assertRepresentation(expected, actual, policy::resources, Collections::emptyList, policy::associatedPolicies);
         assertEquals(expected.getName(), actual.getName());
         assertEquals(expected.getDescription(), actual.getDescription());
         assertEquals(expected.getLogic(), actual.getLogic());

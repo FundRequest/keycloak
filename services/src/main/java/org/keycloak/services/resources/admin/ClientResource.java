@@ -152,7 +152,6 @@ public class ClientResource {
         try {
             updateClientFromRep(rep, client, session);
             adminEvent.operation(OperationType.UPDATE).resourcePath(session.getContext().getUri()).representation(rep).success();
-            updateAuthorizationSettings(rep);
             return Response.noContent().build();
         } catch (ModelDuplicateException e) {
             return ErrorResponse.exists("Client " + rep.getClientId() + " already exists");
@@ -170,11 +169,8 @@ public class ClientResource {
     public ClientRepresentation getClient() {
         auth.clients().requireView(client);
 
-        ClientRepresentation representation = ModelToRepresentation.toRepresentation(client);
+        ClientRepresentation representation = ModelToRepresentation.toRepresentation(client, session);
 
-        if (Profile.isFeatureEnabled(Profile.Feature.AUTHORIZATION)) {
-            representation.setAuthorizationServicesEnabled(authorization().isEnabled());
-        }
         representation.setAccess(auth.clients().getAccess(client));
 
         return representation;
@@ -253,7 +249,7 @@ public class ClientResource {
 
         String token = ClientRegistrationTokenUtils.updateRegistrationAccessToken(session, realm, client, RegistrationAuth.AUTHENTICATED);
 
-        ClientRepresentation rep = ModelToRepresentation.toRepresentation(client);
+        ClientRepresentation rep = ModelToRepresentation.toRepresentation(client, session);
         rep.setRegistrationAccessToken(token);
 
         adminEvent.operation(OperationType.ACTION).resourcePath(session.getContext().getUri()).representation(rep).success();
@@ -335,7 +331,7 @@ public class ClientResource {
 
         ClientScopeModel clientScope = realm.getClientScopeById(clientScopeId);
         if (clientScope == null) {
-            throw new org.jboss.resteasy.spi.NotFoundException("Client scope not found");
+            throw new javax.ws.rs.NotFoundException("Client scope not found");
         }
         client.addClientScope(clientScope, defaultScope);
 
@@ -351,7 +347,7 @@ public class ClientResource {
 
         ClientScopeModel clientScope = realm.getClientScopeById(clientScopeId);
         if (clientScope == null) {
-            throw new org.jboss.resteasy.spi.NotFoundException("Client scope not found");
+            throw new javax.ws.rs.NotFoundException("Client scope not found");
         }
         client.removeClientScope(clientScope);
 
@@ -609,8 +605,6 @@ public class ClientResource {
 
     @Path("/authz")
     public AuthorizationService authorization() {
-        ProfileHelper.requireFeature(Profile.Feature.AUTHORIZATION);
-
         AuthorizationService resource = new AuthorizationService(this.session, this.client, this.auth, adminEvent);
 
         ResteasyProviderFactory.getInstance().injectProperties(resource);
@@ -690,16 +684,19 @@ public class ClientResource {
             auth.clients().requireManage(client);
         }
 
+        if ((rep.isBearerOnly() != null && rep.isBearerOnly()) || (rep.isPublicClient() != null && rep.isPublicClient())) {
+            rep.setAuthorizationServicesEnabled(false);
+        }
+
         RepresentationToModel.updateClient(rep, client);
+        updateAuthorizationSettings(rep);
     }
 
     private void updateAuthorizationSettings(ClientRepresentation rep) {
-        if (Profile.isFeatureEnabled(Profile.Feature.AUTHORIZATION)) {
-            if (TRUE.equals(rep.getAuthorizationServicesEnabled())) {
-                authorization().enable(false);
-            } else {
-                authorization().disable();
-            }
+        if (TRUE.equals(rep.getAuthorizationServicesEnabled())) {
+            authorization().enable(false);
+        } else {
+            authorization().disable();
         }
     }
 }

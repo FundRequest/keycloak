@@ -44,6 +44,14 @@ public interface LoginProtocol extends Provider {
          */
         CANCELLED_BY_USER,
         /**
+         * Applications-initiated action was canceled by the user
+         */
+        CANCELLED_AIA,
+        /**
+         * Applications-initiated action was canceled by the user. Do not send error.
+         */
+        CANCELLED_AIA_SILENT,
+        /**
          * Consent denied by the user
          */
         CONSENT_DENIED,
@@ -68,7 +76,7 @@ public interface LoginProtocol extends Provider {
 
     LoginProtocol setEventBuilder(EventBuilder event);
 
-    Response authenticated(UserSessionModel userSession, ClientSessionContext clientSessionCtx);
+    Response authenticated(AuthenticationSessionModel authSession, UserSessionModel userSession, ClientSessionContext clientSessionCtx);
 
     Response sendError(AuthenticationSessionModel authSession, Error error);
 

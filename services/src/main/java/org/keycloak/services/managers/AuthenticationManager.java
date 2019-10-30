@@ -20,29 +20,52 @@ import org.jboss.logging.Logger;
 import org.jboss.resteasy.spi.HttpRequest;
 import org.keycloak.OAuth2Constants;
 import org.keycloak.TokenVerifier;
-import org.keycloak.authentication.*;
+import org.keycloak.TokenVerifier.Predicate;
+import org.keycloak.TokenVerifier.TokenTypeCheck;
+import org.keycloak.authentication.AuthenticationFlowError;
+import org.keycloak.authentication.AuthenticationFlowException;
+import org.keycloak.authentication.AuthenticationProcessor;
+import org.keycloak.authentication.ConsoleDisplayMode;
+import org.keycloak.authentication.DisplayTypeRequiredActionFactory;
+import org.keycloak.authentication.InitiatedActionSupport;
+import org.keycloak.authentication.RequiredActionContext;
+import org.keycloak.authentication.RequiredActionContextResult;
+import org.keycloak.authentication.RequiredActionFactory;
+import org.keycloak.authentication.RequiredActionProvider;
 import org.keycloak.authentication.actiontoken.DefaultActionTokenKey;
 import org.keycloak.broker.provider.IdentityProvider;
 import org.keycloak.common.ClientConnection;
 import org.keycloak.common.VerificationException;
 import org.keycloak.common.util.Base64Url;
 import org.keycloak.common.util.Time;
+import org.keycloak.crypto.SignatureProvider;
+import org.keycloak.crypto.SignatureVerifierContext;
 import org.keycloak.events.Details;
 import org.keycloak.events.Errors;
 import org.keycloak.events.EventBuilder;
 import org.keycloak.events.EventType;
 import org.keycloak.forms.login.LoginFormsProvider;
-import org.keycloak.jose.jws.AlgorithmType;
-import org.keycloak.jose.jws.JWSBuilder;
-import org.keycloak.models.*;
+import org.keycloak.models.ActionTokenKeyModel;
+import org.keycloak.models.ActionTokenStoreProvider;
+import org.keycloak.models.AuthenticatedClientSessionModel;
+import org.keycloak.models.ClientModel;
+import org.keycloak.models.ClientScopeModel;
+import org.keycloak.models.ClientSessionContext;
+import org.keycloak.models.Constants;
+import org.keycloak.models.KeycloakSession;
+import org.keycloak.models.RealmModel;
+import org.keycloak.models.RequiredActionProviderModel;
+import org.keycloak.models.UserConsentModel;
+import org.keycloak.models.UserModel;
+import org.keycloak.models.UserSessionModel;
 import org.keycloak.models.utils.KeycloakModelUtils;
 import org.keycloak.models.utils.SessionTimeoutHelper;
 import org.keycloak.models.utils.SystemClientUtil;
 import org.keycloak.protocol.LoginProtocol;
 import org.keycloak.protocol.LoginProtocol.Error;
 import org.keycloak.protocol.oidc.OIDCLoginProtocol;
-import org.keycloak.protocol.oidc.TokenManager;
 import org.keycloak.representations.AccessToken;
+import org.keycloak.services.ForbiddenException;
 import org.keycloak.services.ServicesLogger;
 import org.keycloak.services.Urls;
 import org.keycloak.services.messages.Messages;
@@ -56,7 +79,6 @@ import org.keycloak.sessions.CommonClientSessionModel;
 import org.keycloak.sessions.RootAuthenticationSessionModel;
 import org.keycloak.util.TokenUtil;
 
-import javax.crypto.SecretKey;
 import javax.ws.rs.core.Cookie;
 import javax.ws.rs.core.HttpHeaders;
 import javax.ws.rs.core.NewCookie;
@@ -64,10 +86,19 @@ import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriBuilder;
 import javax.ws.rs.core.UriInfo;
 import java.net.URI;
-import java.security.PublicKey;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.stream.Collectors;
-import java.util.AbstractMap.SimpleEntry;
+import org.keycloak.models.AccountRoles;
+
+import static org.keycloak.protocol.oidc.endpoints.AuthorizationEndpoint.LOGIN_SESSION_NOTE_ADDITIONAL_REQ_PARAMS_PREFIX;
 
 /**
  * Stateless object that manages authentication
@@ -99,6 +130,10 @@ public class AuthenticationManager {
     public static final String KEYCLOAK_SESSION_COOKIE = "KEYCLOAK_SESSION";
     public static final String KEYCLOAK_REMEMBER_ME = "KEYCLOAK_REMEMBER_ME";
     public static final String KEYCLOAK_LOGOUT_PROTOCOL = "KEYCLOAK_LOGOUT_PROTOCOL";
+    private static final TokenTypeCheck VALIDATE_IDENTITY_COOKIE = new TokenTypeCheck(TokenUtil.TOKEN_TYPE_KEYCLOAK_ID);
+    private static final String AIA_REQUEST = LOGIN_SESSION_NOTE_ADDITIONAL_REQ_PARAMS_PREFIX + Constants.KC_ACTION;
+    public static final String IS_AIA_REQUEST = LOGIN_SESSION_NOTE_ADDITIONAL_REQ_PARAMS_PREFIX + Constants.IS_AIA_REQUEST;
+    public static final String IS_SILENT_CANCEL = LOGIN_SESSION_NOTE_ADDITIONAL_REQ_PARAMS_PREFIX + Constants.AIA_SILENT_CANCEL;
 
     public static boolean isSessionValid(RealmModel realm, UserSessionModel userSession) {
         if (userSession == null) {
@@ -106,12 +141,16 @@ public class AuthenticationManager {
             return false;
         }
         int currentTime = Time.currentTime();
-        int max = userSession.getStarted() + realm.getSsoSessionMaxLifespan();
 
         // Additional time window is added for the case when session was updated in different DC and the update to current DC was postponed
-        int maxIdle = realm.getSsoSessionIdleTimeout() + SessionTimeoutHelper.IDLE_TIMEOUT_WINDOW_SECONDS;
+        int maxIdle = userSession.isRememberMe() && realm.getSsoSessionIdleTimeoutRememberMe() > 0 ?
+            realm.getSsoSessionIdleTimeoutRememberMe() : realm.getSsoSessionIdleTimeout();
+        int maxLifespan = userSession.isRememberMe() && realm.getSsoSessionMaxLifespanRememberMe() > 0 ?
+                realm.getSsoSessionMaxLifespanRememberMe() : realm.getSsoSessionMaxLifespan();
 
-        return userSession.getLastSessionRefresh() + maxIdle > currentTime && max > currentTime;
+        boolean sessionIdleOk = maxIdle > currentTime - userSession.getLastSessionRefresh() - SessionTimeoutHelper.IDLE_TIMEOUT_WINDOW_SECONDS;
+        boolean sessionMaxOk = maxLifespan > currentTime - userSession.getStarted();
+        return sessionIdleOk && sessionMaxOk;
     }
 
     public static boolean isOfflineSessionValid(RealmModel realm, UserSessionModel userSession) {
@@ -142,12 +181,16 @@ public class AuthenticationManager {
             TokenVerifier<AccessToken> verifier = TokenVerifier.create(tokenString, AccessToken.class)
               .realmUrl(Urls.realmIssuer(uriInfo.getBaseUri(), realm.getName()))
               .checkActive(false)
-              .checkTokenType(false);
+              .checkTokenType(false)
+              .withChecks(VALIDATE_IDENTITY_COOKIE);
 
             String kid = verifier.getHeader().getKeyId();
-            SecretKey secretKey = session.keys().getHmacSecretKey(realm, kid);
+            String algorithm = verifier.getHeader().getAlgorithm().name();
 
-            AccessToken token = verifier.secretKey(secretKey).verify().getToken();
+            SignatureVerifierContext signatureVerifier = session.getProvider(SignatureProvider.class, algorithm).verifier(kid);
+            verifier.verifierContext(signatureVerifier);
+
+            AccessToken token = verifier.verify().getToken();
             UserSessionModel cookieSession = session.sessions().getUserSession(realm, token.getSessionState());
             if (cookieSession == null || !cookieSession.getId().equals(userSession.getId())) return;
             expireIdentityCookie(realm, uriInfo, connection);
@@ -207,7 +250,8 @@ public class AuthenticationManager {
             backchannelLogoutAll(session, realm, userSession, logoutAuthSession, uriInfo, headers, logoutBroker);
             checkUserSessionOnlyHasLoggedOutClients(realm, userSession, logoutAuthSession);
         } finally {
-            asm.removeAuthenticationSession(realm, logoutAuthSession, false);
+            RootAuthenticationSessionModel rootAuthSession = logoutAuthSession.getParentSession();
+            rootAuthSession.removeAuthenticationSessionByTabId(logoutAuthSession.getTabId());
         }
 
         userSession.setState(UserSessionModel.State.LOGGED_OUT);
@@ -255,12 +299,12 @@ public class AuthenticationManager {
 
         // See if we have logoutAuthSession inside current rootSession. Create new if not
         Optional<AuthenticationSessionModel> found = rootLogoutSession.getAuthenticationSessions().values().stream().filter((AuthenticationSessionModel authSession) -> {
-
             return client.equals(authSession.getClient()) && Objects.equals(AuthenticationSessionModel.Action.LOGGING_OUT.name(), authSession.getAction());
 
         }).findFirst();
 
         AuthenticationSessionModel logoutAuthSession = found.isPresent() ? found.get() : rootLogoutSession.createAuthenticationSession(client);
+        session.getContext().setAuthenticationSession(logoutAuthSession);
 
         logoutAuthSession.setAction(AuthenticationSessionModel.Action.LOGGING_OUT.name());
         return logoutAuthSession;
@@ -455,14 +499,20 @@ public class AuthenticationManager {
         for (UserSessionModel userSession : userSessions) {
             AuthenticatedClientSessionModel clientSession = userSession.getAuthenticatedClientSessionByClient(client.getId());
             if (clientSession != null) {
-                AuthenticationManager.backchannelLogoutClientSession(session, realm, clientSession, null, uriInfo, headers);
+                backchannelLogoutClientSession(session, realm, clientSession, null, uriInfo, headers);
                 clientSession.setAction(AuthenticationSessionModel.Action.LOGGED_OUT.name());
-                TokenManager.dettachClientSession(session.sessions(), realm, clientSession);
+                org.keycloak.protocol.oidc.TokenManager.dettachClientSession(session.sessions(), realm, clientSession);
             }
         }
     }
 
-    public static Response browserLogout(KeycloakSession session, RealmModel realm, UserSessionModel userSession, UriInfo uriInfo, ClientConnection connection, HttpHeaders headers) {
+    public static Response browserLogout(KeycloakSession session,
+                                         RealmModel realm,
+                                         UserSessionModel userSession,
+                                         UriInfo uriInfo,
+                                         ClientConnection connection,
+                                         HttpHeaders headers,
+                                         String initiatingIdp) {
         if (userSession == null) return null;
 
         if (logger.isDebugEnabled()) {
@@ -483,7 +533,7 @@ public class AuthenticationManager {
         }
 
         String brokerId = userSession.getNote(Details.IDENTITY_PROVIDER);
-        if (brokerId != null) {
+        if (brokerId != null && !brokerId.equals(initiatingIdp)) {
             IdentityProvider identityProvider = IdentityBrokerService.getIdentityProvider(session, realm, brokerId);
             response = identityProvider.keycloakInitiatedBrowserLogout(session, userSession, uriInfo, realm);
             if (response != null) {
@@ -537,16 +587,21 @@ public class AuthenticationManager {
     }
 
 
-    public static AccessToken createIdentityToken(KeycloakSession keycloakSession, RealmModel realm, UserModel user, UserSessionModel session, String issuer) {
-        AccessToken token = new AccessToken();
+    public static IdentityCookieToken createIdentityToken(KeycloakSession keycloakSession, RealmModel realm, UserModel user, UserSessionModel session, String issuer) {
+        IdentityCookieToken token = new IdentityCookieToken();
         token.id(KeycloakModelUtils.generateId());
         token.issuedNow();
         token.subject(user.getId());
         token.issuer(issuer);
+        token.type(TokenUtil.TOKEN_TYPE_KEYCLOAK_ID);
+
         if (session != null) {
             token.setSessionState(session.getId());
         }
-        if (realm.getSsoSessionMaxLifespan() > 0) {
+
+        if (session != null && session.isRememberMe() && realm.getSsoSessionMaxLifespanRememberMe() > 0) {
+            token.expiration(Time.currentTime() + realm.getSsoSessionMaxLifespanRememberMe());
+        } else if (realm.getSsoSessionMaxLifespan() > 0) {
             token.expiration(Time.currentTime() + realm.getSsoSessionMaxLifespan());
         }
 
@@ -563,12 +618,12 @@ public class AuthenticationManager {
     public static void createLoginCookie(KeycloakSession keycloakSession, RealmModel realm, UserModel user, UserSessionModel session, UriInfo uriInfo, ClientConnection connection) {
         String cookiePath = getIdentityCookiePath(realm, uriInfo);
         String issuer = Urls.realmIssuer(uriInfo.getBaseUri(), realm.getName());
-        AccessToken identityToken = createIdentityToken(keycloakSession, realm, user, session, issuer);
-        String encoded = encodeToken(keycloakSession, realm, identityToken);
+        IdentityCookieToken identityCookieToken = createIdentityToken(keycloakSession, realm, user, session, issuer);
+        String encoded = keycloakSession.tokens().encode(identityCookieToken);
         boolean secureOnly = realm.getSslRequired().isRequired(connection);
         int maxAge = NewCookie.DEFAULT_MAX_AGE;
         if (session != null && session.isRememberMe()) {
-            maxAge = realm.getSsoSessionMaxLifespan();
+            maxAge = realm.getSsoSessionMaxLifespanRememberMe() > 0 ? realm.getSsoSessionMaxLifespanRememberMe() : realm.getSsoSessionMaxLifespan();
         }
         logger.debugv("Create login cookie - name: {0}, path: {1}, max-age: {2}", KEYCLOAK_IDENTITY_COOKIE, cookiePath, maxAge);
         CookieHelper.addCookie(KEYCLOAK_IDENTITY_COOKIE, encoded, cookiePath, null, null, maxAge, secureOnly, true);
@@ -580,8 +635,9 @@ public class AuthenticationManager {
         }
         // THIS SHOULD NOT BE A HTTPONLY COOKIE!  It is used for OpenID Connect Iframe Session support!
         // Max age should be set to the max lifespan of the session as it's used to invalidate old-sessions on re-login
-        CookieHelper.addCookie(KEYCLOAK_SESSION_COOKIE, sessionCookieValue, cookiePath, null, null, realm.getSsoSessionMaxLifespan(), secureOnly, false);
-        P3PHelper.addP3PHeader(keycloakSession);
+        int sessionCookieMaxAge = session.isRememberMe() && realm.getSsoSessionMaxLifespanRememberMe() > 0 ? realm.getSsoSessionMaxLifespanRememberMe() : realm.getSsoSessionMaxLifespan();
+        CookieHelper.addCookie(KEYCLOAK_SESSION_COOKIE, sessionCookieValue, cookiePath, null, null, sessionCookieMaxAge, secureOnly, false);
+        P3PHelper.addP3PHeader();
     }
 
     public static void createRememberMeCookie(RealmModel realm, String username, UriInfo uriInfo, ClientConnection connection) {
@@ -604,18 +660,6 @@ public class AuthenticationManager {
             }
         }
         return null;
-    }
-
-    protected static String encodeToken(KeycloakSession session, RealmModel realm, Object token) {
-        KeyManager.ActiveHmacKey activeKey = session.keys().getActiveHmacKey(realm);
-
-        logger.tracef("Encoding token with kid '%s'", activeKey.getKid());
-
-        String encodedToken = new JWSBuilder()
-                .kid(activeKey.getKid())
-                .jsonContent(token)
-                .hmac256(activeKey.getSecretKey());
-        return encodedToken;
     }
 
     public static void expireIdentityCookie(RealmModel realm, UriInfo uriInfo, ClientConnection connection) {
@@ -672,7 +716,7 @@ public class AuthenticationManager {
     }
 
     public static void expireCookie(RealmModel realm, String cookieName, String path, boolean httpOnly, ClientConnection connection) {
-        logger.debugv("Expiring cookie: {0} path: {1}", cookieName, path);
+        logger.debugf("Expiring cookie: %s path: %s", cookieName, path);
         boolean secureOnly = realm.getSslRequired().isRequired(connection);;
         CookieHelper.addCookie(cookieName, "", path, null, "Expiring cookie", 0, secureOnly, httpOnly);
     }
@@ -689,7 +733,7 @@ public class AuthenticationManager {
         }
 
         String tokenString = cookie.getValue();
-        AuthResult authResult = verifyIdentityToken(session, realm, session.getContext().getUri(), session.getContext().getConnection(), checkActive, false, true, tokenString, session.getContext().getRequestHeaders());
+        AuthResult authResult = verifyIdentityToken(session, realm, session.getContext().getUri(), session.getContext().getConnection(), checkActive, false, true, tokenString, session.getContext().getRequestHeaders(), VALIDATE_IDENTITY_COOKIE);
         if (authResult == null) {
             expireIdentityCookie(realm, session.getContext().getUri(), session.getContext().getConnection());
             expireOldIdentityCookie(realm, session.getContext().getUri(), session.getContext().getConnection());
@@ -703,20 +747,20 @@ public class AuthenticationManager {
     public static Response redirectAfterSuccessfulFlow(KeycloakSession session, RealmModel realm, UserSessionModel userSession,
                                                        ClientSessionContext clientSessionCtx,
                                                 HttpRequest request, UriInfo uriInfo, ClientConnection clientConnection,
-                                                EventBuilder event, String protocol) {
-        LoginProtocol protocolImpl = session.getProvider(LoginProtocol.class, protocol);
+                                                EventBuilder event, AuthenticationSessionModel authSession) {
+        LoginProtocol protocolImpl = session.getProvider(LoginProtocol.class, authSession.getProtocol());
         protocolImpl.setRealm(realm)
                 .setHttpHeaders(request.getHttpHeaders())
                 .setUriInfo(uriInfo)
                 .setEventBuilder(event);
-        return redirectAfterSuccessfulFlow(session, realm, userSession, clientSessionCtx, request, uriInfo, clientConnection, event, protocolImpl);
+        return redirectAfterSuccessfulFlow(session, realm, userSession, clientSessionCtx, request, uriInfo, clientConnection, event, authSession, protocolImpl);
 
     }
 
     public static Response redirectAfterSuccessfulFlow(KeycloakSession session, RealmModel realm, UserSessionModel userSession,
                                                        ClientSessionContext clientSessionCtx,
                                                        HttpRequest request, UriInfo uriInfo, ClientConnection clientConnection,
-                                                       EventBuilder event, LoginProtocol protocol) {
+                                                       EventBuilder event, AuthenticationSessionModel authSession, LoginProtocol protocol) {
         Cookie sessionCookie = request.getHttpHeaders().getCookies().get(AuthenticationManager.KEYCLOAK_SESSION_COOKIE);
         if (sessionCookie != null) {
 
@@ -757,7 +801,7 @@ public class AuthenticationManager {
             clientSession.removeNote(SSO_AUTH);
         }
 
-        return protocol.authenticated(userSession, clientSessionCtx);
+        return protocol.authenticated(authSession, userSession, clientSessionCtx);
 
     }
 
@@ -843,7 +887,7 @@ public class AuthenticationManager {
         event.event(EventType.LOGIN);
         event.session(userSession);
         event.success();
-        return redirectAfterSuccessfulFlow(session, realm, userSession, clientSessionCtx, request, uriInfo, clientConnection, event, authSession.getProtocol());
+        return redirectAfterSuccessfulFlow(session, realm, userSession, clientSessionCtx, request, uriInfo, clientConnection, event, authSession);
     }
 
     // Return null if action is not required. Or the name of the requiredAction in case it is required.
@@ -958,7 +1002,7 @@ public class AuthenticationManager {
         List<ClientScopeModel> clientScopesToDisplay = new LinkedList<>();
 
         for (String clientScopeId : authSession.getClientScopes()) {
-            ClientScopeModel clientScope = KeycloakModelUtils.findClientScopeById(realm, clientScopeId);
+            ClientScopeModel clientScope = KeycloakModelUtils.findClientScopeById(realm, authSession.getClient(), clientScopeId);
 
             if (clientScope == null || !clientScope.isDisplayOnConsentScreen()) {
                 continue;
@@ -982,7 +1026,7 @@ public class AuthenticationManager {
         String scopeParam = authSession.getClientNote(OAuth2Constants.SCOPE);
 
         Set<String> requestedClientScopes = new HashSet<String>();
-        for (ClientScopeModel clientScope : TokenManager.getRequestedClientScopes(scopeParam, client)) {
+        for (ClientScopeModel clientScope : org.keycloak.protocol.oidc.TokenManager.getRequestedClientScopes(scopeParam, client)) {
             requestedClientScopes.add(clientScope.getId());
         }
         authSession.setClientScopes(requestedClientScopes);
@@ -1071,7 +1115,7 @@ public class AuthenticationManager {
         Collections.sort(actions, RequiredActionProviderModel.RequiredActionComparator.SINGLETON);
         return actions;
     }
-
+    
     public static void evaluateRequiredActionTriggers(final KeycloakSession session, final AuthenticationSessionModel authSession, final ClientConnection clientConnection, final HttpRequest request, final UriInfo uriInfo, final EventBuilder event, final RealmModel realm, final UserModel user) {
 
         // see if any required actions need triggering, i.e. an expired password
@@ -1102,39 +1146,56 @@ public class AuthenticationManager {
                 public void ignore() {
                     throw new RuntimeException("Not allowed to call ignore() within evaluateTriggers()");
                 }
+                
+                @Override
+                public void cancelAIA() {
+                    throw new RuntimeException("Not allowed to call cancelAIA() within evaluateTriggers()");
+                }
             };
 
+            evaluateApplicationInitiatedActionTrigger(session, provider, model, authSession);
             provider.evaluateTriggers(result);
         }
     }
+    
+    // Determine if provider is being requested as an Application-Initiated Action
+    // If so, add it to the authSession.
+    private static void evaluateApplicationInitiatedActionTrigger(final KeycloakSession session,
+                                                                  final RequiredActionProvider provider, 
+                                                                  final RequiredActionProviderModel model,
+                                                                  final AuthenticationSessionModel authSession
+                                                                  ) {
+        if (provider.initiatedActionSupport() == InitiatedActionSupport.NOT_SUPPORTED) return;
+        
+        String aia = authSession.getClientNote(AIA_REQUEST);
+        if (aia == null) return;
 
+        // make sure you are evaluating the action that was requested
+        if (!aia.equalsIgnoreCase(model.getProviderId())) return;
+        
+        if (session.getContext().getClient().getRole(AccountRoles.MANAGE_ACCOUNT) == null) {
+            throw new ForbiddenException("Client must have manage-account role to perform application-initiated actions.");
+        }
+        
+        authSession.addRequiredAction(model.getProviderId());
+        authSession.removeClientNote(AIA_REQUEST); // keep this from being executed twice
+        authSession.setClientNote(IS_AIA_REQUEST, "true");
+    }
 
     public static AuthResult verifyIdentityToken(KeycloakSession session, RealmModel realm, UriInfo uriInfo, ClientConnection connection, boolean checkActive, boolean checkTokenType,
-                                                    boolean isCookie, String tokenString, HttpHeaders headers) {
+                                                    boolean isCookie, String tokenString, HttpHeaders headers, Predicate<? super AccessToken>... additionalChecks) {
         try {
             TokenVerifier<AccessToken> verifier = TokenVerifier.create(tokenString, AccessToken.class)
               .withDefaultChecks()
               .realmUrl(Urls.realmIssuer(uriInfo.getBaseUri(), realm.getName()))
               .checkActive(checkActive)
-              .checkTokenType(checkTokenType);
+              .checkTokenType(checkTokenType)
+              .withChecks(additionalChecks);
             String kid = verifier.getHeader().getKeyId();
-            AlgorithmType algorithmType = verifier.getHeader().getAlgorithm().getType();
+            String algorithm = verifier.getHeader().getAlgorithm().name();
 
-            if (AlgorithmType.RSA.equals(algorithmType)) {
-                PublicKey publicKey = session.keys().getRsaPublicKey(realm, kid);
-                if (publicKey == null) {
-                    logger.debugf("Identity cookie signed with unknown kid '%s'", kid);
-                    return null;
-                }
-                verifier.publicKey(publicKey);
-            } else if (AlgorithmType.HMAC.equals(algorithmType)) {
-                SecretKey secretKey = session.keys().getHmacSecretKey(realm, kid);
-                if (secretKey == null) {
-                    logger.debugf("Identity cookie signed with unknown kid '%s'", kid);
-                    return null;
-                }
-                verifier.secretKey(secretKey);
-            }
+            SignatureVerifierContext signatureVerifier = session.getProvider(SignatureProvider.class, algorithm).verifier(kid);
+            verifier.verifierContext(signatureVerifier);
 
             AccessToken token = verifier.verify().getToken();
             if (checkActive) {

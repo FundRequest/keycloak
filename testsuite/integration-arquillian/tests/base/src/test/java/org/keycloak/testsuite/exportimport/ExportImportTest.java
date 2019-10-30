@@ -81,12 +81,7 @@ public class ExportImportTest extends AbstractKeycloakTest {
 
     @Override
     public void beforeAbstractKeycloakTestRealmImport() {
-        // remove all realms (accidentally left by other tests) except for master
-        adminClient.realms().findAll().stream()
-                .map(RealmRepresentation::getRealm)
-                .filter(realmName -> ! realmName.equals("master"))
-                .forEach(this::removeRealm);
-        assertThat(adminClient.realms().findAll().size(), is(equalTo(1)));
+        removeAllRealmsDespiteMaster();
     }
 
     private void setEventsConfig(RealmRepresentation realm) {
@@ -231,6 +226,12 @@ public class ExportImportTest extends AbstractKeycloakTest {
         removeRealm("test-realm");
         Assert.assertNames(adminClient.realms().findAll(), "master");
 
+        Map<String, RequiredActionProviderRepresentation> requiredActionsBeforeImport = new HashMap<>();
+        adminClient.realm("master").flows().getRequiredActions().stream()
+                .forEach(action -> {
+                    requiredActionsBeforeImport.put(action.getAlias(), action);
+                });
+
         assertNotAuthenticated("test", "test-user@localhost", "password");
         assertNotAuthenticated("test", "user1", "password");
         assertNotAuthenticated("test", "user2", "password");
@@ -251,6 +252,17 @@ public class ExportImportTest extends AbstractKeycloakTest {
 
         // KEYCLOAK-6050 Check SMTP password is exported/imported
         assertEquals("secret", testingClient.server("test").fetch(RunHelpers.internalRealm()).getSmtpServer().get("password"));
+
+        // KEYCLOAK-8176 Check required actions are exported/imported properly
+        List<RequiredActionProviderRepresentation> requiredActionsAfterImport = adminClient.realm("master").flows().getRequiredActions();
+        assertThat(requiredActionsAfterImport.size(), is(equalTo(requiredActionsBeforeImport.size())));
+        requiredActionsAfterImport.stream()
+                .forEach((action) -> {
+                    RequiredActionProviderRepresentation beforeImportAction = requiredActionsBeforeImport.get(action.getAlias());
+                    assertThat(action.getName(), is(equalTo(beforeImportAction.getName())));
+                    assertThat(action.getProviderId(), is(equalTo(beforeImportAction.getProviderId())));
+                    assertThat(action.getPriority(), is(equalTo(beforeImportAction.getPriority())));
+                });
     }
 
     private void testRealmExportImport() throws LifecycleException {
@@ -262,6 +274,7 @@ public class ExportImportTest extends AbstractKeycloakTest {
         List<ComponentRepresentation> components = adminClient.realm("test").components().query();
         KeysMetadataRepresentation keyMetadata = adminClient.realm("test").keys().getKeyMetadata();
         String sampleRealmRoleId = adminClient.realm("test").roles().get("sample-realm-role").toRepresentation().getId();
+        Map<String, List<String>> roleAttributes = adminClient.realm("test").roles().get("attribute-role").toRepresentation().getAttributes();
         String testAppId = adminClient.realm("test").clients().findByClientId("test-app").get(0).getId();
         String sampleClientRoleId = adminClient.realm("test").clients().get(testAppId).roles().get("sample-client-role").toRepresentation().getId();
 
@@ -296,6 +309,9 @@ public class ExportImportTest extends AbstractKeycloakTest {
 
         String importedSampleRealmRoleId = adminClient.realm("test").roles().get("sample-realm-role").toRepresentation().getId();
         assertEquals(sampleRealmRoleId, importedSampleRealmRoleId);
+
+        Map<String, List<String>> importedRoleAttributes = adminClient.realm("test").roles().get("attribute-role").toRepresentation().getAttributes();
+        Assert.assertRoleAttributes(roleAttributes, importedRoleAttributes);
 
         String importedSampleClientRoleId = adminClient.realm("test").clients().get(testAppId).roles().get("sample-client-role").toRepresentation().getId();
         assertEquals(sampleClientRoleId, importedSampleClientRoleId);

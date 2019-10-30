@@ -63,6 +63,7 @@ public class JsonFileImport198MigrationTest extends AbstractJsonFileImportMigrat
 
     @Test
     public void migration1_9_8Test() throws Exception {
+        checkRealmsImported();
         testMigratedMigrationData(false);
         testMigrationTo2_0_0();
         testMigrationTo2_1_0();
@@ -71,7 +72,10 @@ public class JsonFileImport198MigrationTest extends AbstractJsonFileImportMigrat
         testMigrationTo2_5_0();
         //testMigrationTo2_5_1(); // Offline tokens migration is skipped for JSON
         testMigrationTo3_x();
-        testMigrationTo4_x(false);
+        testMigrationTo4_x(false, false);
+        testMigrationTo5_x();
+        testMigrationTo6_x();
+        testMigrationTo7_x(false);
     }
 
     @Override
@@ -79,9 +83,5 @@ public class JsonFileImport198MigrationTest extends AbstractJsonFileImportMigrat
         testUpdateProtocolMappers(migrationRealm);
         testExtractRealmKeysMigrationRealm(migrationRealm);
     }
-
-
-
-
 
 }

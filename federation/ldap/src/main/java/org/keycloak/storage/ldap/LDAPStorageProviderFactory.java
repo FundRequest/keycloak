@@ -128,6 +128,9 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
                 .type(ProviderConfigProperty.STRING_TYPE)
                 .defaultValue("simple")
                 .add()
+                .property().name(LDAPConstants.START_TLS)
+                .type(ProviderConfigProperty.BOOLEAN_TYPE)
+                .add()
                 .property().name(LDAPConstants.BIND_DN)
                 .type(ProviderConfigProperty.STRING_TYPE)
                 .add()
@@ -143,6 +146,10 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
                 .defaultValue("1")
                 .add()
                 .property().name(LDAPConstants.VALIDATE_PASSWORD_POLICY)
+                .type(ProviderConfigProperty.BOOLEAN_TYPE)
+                .defaultValue("false")
+                .add()
+                .property().name(LDAPConstants.TRUST_EMAIL)
                 .type(ProviderConfigProperty.BOOLEAN_TYPE)
                 .defaultValue("false")
                 .add()
@@ -267,6 +274,9 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
             }
         }
 
+        if(cfg.isStartTls() && cfg.getConnectionPooling() != null) {
+            throw new ComponentValidationException("ldapErrorCantEnableStartTlsAndConnectionPooling");
+        }
     }
 
     @Override
@@ -424,13 +434,14 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
 
         logger.infof("Sync all users from LDAP to local store: realm: %s, federation provider: %s", realmId, model.getName());
 
-        LDAPQuery userQuery = createQuery(sessionFactory, realmId, model);
-        SynchronizationResult syncResult = syncImpl(sessionFactory, userQuery, realmId, model);
+        try (LDAPQuery userQuery = createQuery(sessionFactory, realmId, model)) {
+            SynchronizationResult syncResult = syncImpl(sessionFactory, userQuery, realmId, model);
 
-        // TODO: Remove all existing keycloak users, which have federation links, but are not in LDAP. Perhaps don't check users, which were just added or updated during this sync?
+            // TODO: Remove all existing keycloak users, which have federation links, but are not in LDAP. Perhaps don't check users, which were just added or updated during this sync?
 
-        logger.infof("Sync all users finished: %s", syncResult.getStatus());
-        return syncResult;
+            logger.infof("Sync all users finished: %s", syncResult.getStatus());
+            return syncResult;
+        }
     }
 
     @Override
@@ -445,12 +456,13 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
         Condition modifyCondition = conditionsBuilder.greaterThanOrEqualTo(LDAPConstants.MODIFY_TIMESTAMP, lastSync);
         Condition orCondition = conditionsBuilder.orCondition(createCondition, modifyCondition);
 
-        LDAPQuery userQuery = createQuery(sessionFactory, realmId, model);
-        userQuery.addWhereCondition(orCondition);
-        SynchronizationResult result = syncImpl(sessionFactory, userQuery, realmId, model);
+        try (LDAPQuery userQuery = createQuery(sessionFactory, realmId, model)) {
+            userQuery.addWhereCondition(orCondition);
+            SynchronizationResult result = syncImpl(sessionFactory, userQuery, realmId, model);
 
-        logger.infof("Sync changed users finished: %s", result.getStatus());
-        return result;
+            logger.infof("Sync changed users finished: %s", result.getStatus());
+            return result;
+        }
     }
 
     protected void syncMappers(KeycloakSessionFactory sessionFactory, final String realmId, final ComponentModel model) {
@@ -459,6 +471,7 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
             @Override
             public void run(KeycloakSession session) {
                 RealmModel realm = session.realms().getRealm(realmId);
+                session.getContext().setRealm(realm);
                 session.getProvider(UserStorageProvider.class, model);
                 List<ComponentModel> mappers = realm.getComponents(model.getId(), LDAPStorageMapper.class.getName());
                 for (ComponentModel mapperModel : mappers) {
@@ -486,7 +499,7 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
             while (nextPage) {
                 userQuery.setLimit(pageSize);
                 final List<LDAPObject> users = userQuery.getResultList();
-                nextPage = userQuery.getPaginationContext() != null;
+                nextPage = userQuery.getPaginationContext().hasNextPage();
                 SynchronizationResult currentPageSync = importLdapUsers(sessionFactory, realmId, fedModel, users);
                 syncResult.add(currentPageSync);
             }
@@ -500,6 +513,13 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
         return syncResult;
     }
 
+    /**
+     *  !! This function must be called from try-with-resources block, otherwise Vault secrets may be leaked !!
+     * @param sessionFactory
+     * @param realmId
+     * @param model
+     * @return
+     */
     private LDAPQuery createQuery(KeycloakSessionFactory sessionFactory, final String realmId, final ComponentModel model) {
         class QueryHolder {
             LDAPQuery query;
@@ -510,6 +530,8 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
 
             @Override
             public void run(KeycloakSession session) {
+                session.getContext().setRealm(session.realms().getRealm(realmId));
+
                 LDAPStorageProvider ldapFedProvider = (LDAPStorageProvider)session.getProvider(UserStorageProvider.class, model);
                 RealmModel realm = session.realms().getRealm(realmId);
                 queryHolder.query = LDAPUtils.createQueryForUserSearch(ldapFedProvider, realm);
@@ -538,6 +560,7 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
                     public void run(KeycloakSession session) {
                         LDAPStorageProvider ldapFedProvider = (LDAPStorageProvider)session.getProvider(UserStorageProvider.class, fedModel);
                         RealmModel currentRealm = session.realms().getRealm(realmId);
+                        session.getContext().setRealm(currentRealm);
 
                         String username = LDAPUtils.getUsername(ldapUser, ldapFedProvider.getLdapIdentityStore().getConfig());
                         exists.value = true;
@@ -587,6 +610,8 @@ public class LDAPStorageProviderFactory implements UserStorageProviderFactory<LD
                         public void run(KeycloakSession session) {
                             LDAPStorageProvider ldapFedProvider = (LDAPStorageProvider)session.getProvider(UserStorageProvider.class, fedModel);
                             RealmModel currentRealm = session.realms().getRealm(realmId);
+                            session.getContext().setRealm(currentRealm);
+
                             String username = null;
                             try {
                                 username = LDAPUtils.getUsername(ldapUser, ldapFedProvider.getLdapIdentityStore().getConfig());

@@ -56,8 +56,6 @@ import org.keycloak.util.JsonSerialization;
  */
 public class PolicyResourceService {
 
-    @Context
-    private KeycloakSession session;
     private final Policy policy;
     protected final ResourceServer resourceServer;
     protected final AuthorizationProvider authorization;
@@ -111,13 +109,13 @@ public class PolicyResourceService {
         PolicyStore policyStore = storeFactory.getPolicyStore();
         PolicyProviderFactory resource = getProviderFactory(policy.getType());
 
-        resource.onRemove(policy, authorization);
+        if (resource != null) {
+            resource.onRemove(policy, authorization);
+        }
 
         policyStore.delete(policy.getId());
 
-        if (authorization.getRealm().isAdminEventsEnabled()) {
-            audit(toRepresentation(policy, authorization), OperationType.DELETE);
-        }
+        audit(toRepresentation(policy, authorization), OperationType.DELETE);
 
         return Response.noContent().build();
     }
@@ -259,8 +257,6 @@ public class PolicyResourceService {
     }
 
     private void audit(AbstractPolicyRepresentation policy, OperationType operation) {
-        if (authorization.getRealm().isAdminEventsEnabled()) {
-            adminEvent.operation(operation).resourcePath(session.getContext().getUri()).representation(policy).success();
-        }
+        adminEvent.operation(operation).resourcePath(authorization.getKeycloakSession().getContext().getUri()).representation(policy).success();
     }
 }

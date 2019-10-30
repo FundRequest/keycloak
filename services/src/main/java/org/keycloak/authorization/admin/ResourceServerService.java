@@ -38,9 +38,7 @@ import org.keycloak.events.admin.OperationType;
 import org.keycloak.events.admin.ResourceType;
 import org.keycloak.exportimport.util.ExportUtils;
 import org.keycloak.models.ClientModel;
-import org.keycloak.models.Constants;
 import org.keycloak.models.KeycloakSession;
-import org.keycloak.models.RoleModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.models.utils.ModelToRepresentation;
 import org.keycloak.models.utils.RepresentationToModel;
@@ -77,10 +75,6 @@ public class ResourceServerService {
     }
 
     public ResourceServer create(boolean newClient) {
-        if (resourceServer != null) {
-            throw new IllegalStateException("Resource server already created");
-        }
-
         this.auth.realm().requireManageAuthorization();
 
         UserModel serviceAccount = this.session.users().getServiceAccount(client);
@@ -89,10 +83,11 @@ public class ResourceServerService {
             throw new RuntimeException("Client does not have a service account.");
         }
 
-        this.resourceServer = this.authorization.getStoreFactory().getResourceServerStore().create(this.client.getId());
-        createDefaultRoles(serviceAccount);
-        createDefaultPermission(createDefaultResource(), createDefaultPolicy());
-        audit(OperationType.CREATE, session.getContext().getUri(), newClient);
+        if (this.resourceServer == null) {
+            this.resourceServer = RepresentationToModel.createResourceServer(client, session, true);
+            createDefaultPermission(createDefaultResource(), createDefaultPolicy());
+            audit(OperationType.CREATE, session.getContext().getUri(), newClient);
+        }
 
         return resourceServer;
     }
@@ -104,6 +99,7 @@ public class ResourceServerService {
         this.auth.realm().requireManageAuthorization();
         this.resourceServer.setAllowRemoteResourceManagement(server.isAllowRemoteResourceManagement());
         this.resourceServer.setPolicyEnforcementMode(server.getPolicyEnforcementMode());
+        this.resourceServer.setDecisionStrategy(server.getDecisionStrategy());
         audit(OperationType.UPDATE, session.getContext().getUri(), false);
         return Response.noContent().build();
     }
@@ -209,6 +205,8 @@ public class ResourceServerService {
         defaultPolicyConfig.put("code", "// by default, grants any permission associated with this policy\n$evaluation.grant();\n");
 
         defaultPolicy.setConfig(defaultPolicyConfig);
+        
+        session.setAttribute("ALLOW_CREATE_POLICY", true);
 
         getPolicyResource().create(defaultPolicy);
 
@@ -224,18 +222,6 @@ public class ResourceServerService {
 
         getResourceSetResource().create(defaultResource);
         return defaultResource;
-    }
-
-    private void createDefaultRoles(UserModel serviceAccount) {
-        RoleModel umaProtectionRole = client.getRole(Constants.AUTHZ_UMA_PROTECTION);
-
-        if (umaProtectionRole == null) {
-            umaProtectionRole = client.addRole(Constants.AUTHZ_UMA_PROTECTION);
-        }
-
-        if (!serviceAccount.hasRole(umaProtectionRole)) {
-            serviceAccount.grantRole(umaProtectionRole);
-        }
     }
 
     private void audit(OperationType operation, UriInfo uriInfo, boolean newClient) {

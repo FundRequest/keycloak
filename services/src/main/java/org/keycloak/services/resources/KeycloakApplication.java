@@ -22,8 +22,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jboss.dmr.ModelNode;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.core.Dispatcher;
-import org.jboss.resteasy.spi.ResteasyProviderFactory;
 import org.keycloak.Config;
+import org.keycloak.common.util.Resteasy;
 import org.keycloak.common.util.SystemEnvProperties;
 import org.keycloak.exportimport.ExportImportManager;
 import org.keycloak.migration.MigrationModelManager;
@@ -33,6 +33,7 @@ import org.keycloak.models.KeycloakSessionTask;
 import org.keycloak.models.ModelDuplicateException;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
+import org.keycloak.models.UserProvider;
 import org.keycloak.models.dblock.DBLockManager;
 import org.keycloak.models.dblock.DBLockProvider;
 import org.keycloak.models.utils.KeycloakModelUtils;
@@ -105,19 +106,23 @@ public class KeycloakApplication extends Application {
     protected KeycloakSessionFactory sessionFactory;
     protected String contextPath;
 
-    public KeycloakApplication(@Context ServletContext context, @Context Dispatcher dispatcher) {
+    public KeycloakApplication() {
         try {
+            logger.debugv("RestEasy provider: {0}", Resteasy.getProvider().getClass().getName());
+
+            ServletContext context = Resteasy.getContextData(ServletContext.class);
+
             if ("true".equals(context.getInitParameter(KEYCLOAK_EMBEDDED))) {
                 embedded = true;
             }
-
+            
             loadConfig(context);
 
             this.contextPath = context.getContextPath();
             this.sessionFactory = createSessionFactory();
 
-            dispatcher.getDefaultContextObjects().put(KeycloakApplication.class, this);
-            ResteasyProviderFactory.pushContext(KeycloakApplication.class, this); // for injection
+            Resteasy.pushDefaultContextObject(KeycloakApplication.class, this);
+            Resteasy.pushContext(KeycloakApplication.class, this); // for injection
             context.setAttribute(KeycloakSessionFactory.class.getName(), this.sessionFactory);
 
             singletons.add(new RobotsResource());
@@ -140,7 +145,7 @@ public class KeycloakApplication extends Application {
                     DBLockManager dbLockManager = new DBLockManager(lockSession);
                     dbLockManager.checkForcedUnlock();
                     DBLockProvider dbLock = dbLockManager.getDBLock();
-                    dbLock.waitForLock();
+                    dbLock.waitForLock(DBLockProvider.Namespace.KEYCLOAK_BOOT);
                     try {
                         exportImportManager[0] = migrateAndBootstrap();
                     } finally {
@@ -427,21 +432,28 @@ public class KeycloakApplication extends Application {
                 for (RealmRepresentation realmRep : realms) {
                     for (UserRepresentation userRep : realmRep.getUsers()) {
                         KeycloakSession session = sessionFactory.create();
+
                         try {
                             session.getTransactionManager().begin();
-
                             RealmModel realm = session.realms().getRealmByName(realmRep.getRealm());
+
                             if (realm == null) {
                                 ServicesLogger.LOGGER.addUserFailedRealmNotFound(userRep.getUsername(), realmRep.getRealm());
+                            }
+
+                            UserProvider users = session.users();
+
+                            if (users.getUserByUsername(userRep.getUsername(), realm) != null) {
+                                ServicesLogger.LOGGER.notCreatingExistingUser(userRep.getUsername());
                             } else {
-                                UserModel user = session.users().addUser(realm, userRep.getUsername());
+                                UserModel user = users.addUser(realm, userRep.getUsername());
                                 user.setEnabled(userRep.isEnabled());
                                 RepresentationToModel.createCredentials(userRep, session, realm, user, false);
                                 RepresentationToModel.createRoleMappings(userRep, user, realm);
+                                ServicesLogger.LOGGER.addUserSuccess(userRep.getUsername(), realmRep.getRealm());
                             }
 
                             session.getTransactionManager().commit();
-                            ServicesLogger.LOGGER.addUserSuccess(userRep.getUsername(), realmRep.getRealm());
                         } catch (ModelDuplicateException e) {
                             session.getTransactionManager().rollback();
                             ServicesLogger.LOGGER.addUserFailedUserExists(userRep.getUsername(), realmRep.getRealm());

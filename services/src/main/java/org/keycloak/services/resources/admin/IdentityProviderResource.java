@@ -18,7 +18,7 @@ package org.keycloak.services.resources.admin;
 
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.annotations.cache.NoCache;
-import org.jboss.resteasy.spi.NotFoundException;
+import javax.ws.rs.NotFoundException;
 import org.keycloak.authorization.model.Resource;
 import org.keycloak.authorization.model.ResourceServer;
 import org.keycloak.broker.provider.IdentityProvider;
@@ -172,6 +172,10 @@ public class IdentityProviderResource {
         String newProviderId = providerRep.getAlias();
         String oldProviderId = getProviderIdByInternalId(realm, internalId);
 
+        if (oldProviderId == null) {
+            lookUpProviderIdByAlias(realm, providerRep);
+        }
+
         IdentityProviderModel updated = RepresentationToModel.toModel(realm, providerRep);
 
         if (updated.getConfig() != null && ComponentRepresentation.SECRET_VALUE.equals(updated.getConfig().get("clientSecret"))) {
@@ -199,6 +203,18 @@ public class IdentityProviderResource {
         }
 
         return null;
+    }
+
+    // sets internalId to IdentityProvider based on alias
+    private static void lookUpProviderIdByAlias(RealmModel realm, IdentityProviderRepresentation providerRep) {
+        List<IdentityProviderModel> providerModels = realm.getIdentityProviders();
+        for (IdentityProviderModel providerModel : providerModels) {
+            if (providerModel.getAlias().equals(providerRep.getAlias())) {
+                providerRep.setInternalId(providerModel.getInternalId());
+                return;
+            }
+        }
+        throw new javax.ws.rs.NotFoundException();
     }
 
     private static void updateUsersAfterProviderAliasChange(List<UserModel> users, String oldProviderId, String newProviderId, RealmModel realm, KeycloakSession session) {

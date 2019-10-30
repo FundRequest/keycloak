@@ -63,7 +63,11 @@ public class JsonFileImport343MigrationTest extends AbstractJsonFileImportMigrat
 
     @Test
     public void migration3_4_3Test() throws Exception {
-        testMigrationTo4_x();
+        checkRealmsImported();
+        testMigrationTo4_x(true, false);
+        testMigrationTo5_x();
+        testMigrationTo6_x();
+        testMigrationTo7_x(true);
     }
 
- }
+}
